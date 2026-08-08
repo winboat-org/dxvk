@@ -270,6 +270,7 @@ namespace dxvk {
         " scanoutTarget=", (m_info.heliosLinearScanoutTarget ? 1u : 0u),
         " directOptimal=", (m_info.heliosDirectOptimalScanout ? 1u : 0u),
         " crossContextOptimal=", (m_info.heliosCrossContextOptimal ? 1u : 0u),
+        " layout=", uint32_t(m_info.layout),
         " usage=0x", std::hex, uint32_t(m_info.usage),
         " flags=0x", uint32_t(m_info.flags), std::dec));
     }
@@ -430,8 +431,9 @@ namespace dxvk {
       formatList.pNext = std::exchange(imageInfo.pNext, &formatList);
 
     // Helios gets WDDM allocation/resource KMT handles from d3d10umddi and
-    // stamps them into DXVK after resource creation. Venus does not expose
-    // VK_KHR_external_memory_win32 in this bridge mode, but virglrenderer will
+    // stamps them into DXVK after resource creation. This bridge protocol is
+    // distinct from native VK_KHR_external_memory_win32, even when the ICD
+    // exposes that extension to other Vulkan applications. Virglrenderer will
     // only bind a VkDeviceMemory to a HOST3D blob if that memory was allocated
     // as exportable. Use Venus' renderer-side opaque-fd handle type for the
     // Vulkan pNext chain while suppressing DXVK's Win32 handle retrieval below.
@@ -940,17 +942,23 @@ namespace dxvk {
     if (sharingInfo.mode == DxvkSharedHandleMode::None)
       return false;
 
-    if (!device->features().khrExternalMemoryWin32) {
-      if (heliosKmtOnlySharedResources()) {
-        if (createInfo.flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
-          Logger::err("Failed to create shared resource: Sharing sparse resources not supported");
-          return false;
-        }
-
-        Logger::warn("Helios KMT shared resource path: proceeding without VK_KHR_external_memory_win32");
-        return true;
+    // The Helios UMD bridge represents D3D KMT sharing with renderer-side
+    // OPAQUE_FD/DMA_BUF memory and stamps the WDDM handles afterwards. It must
+    // keep using that path when the ICD also advertises native Win32 external
+    // memory: OPAQUE_WIN32_KMT is intentionally not a Vulkan-capable handle
+    // type in Venus, so sending it through the native format query would mark
+    // the image non-shared and allocate non-exportable memory.
+    if (heliosKmtOnlySharedResources()) {
+      if (createInfo.flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+        Logger::err("Failed to create shared resource: Sharing sparse resources not supported");
+        return false;
       }
 
+      Logger::warn("Helios KMT shared resource path: using renderer-backed external memory");
+      return true;
+    }
+
+    if (!device->features().khrExternalMemoryWin32) {
       Logger::err("Failed to create shared resource: VK_KHR_EXTERNAL_MEMORY_WIN32 not supported");
       return false;
     }

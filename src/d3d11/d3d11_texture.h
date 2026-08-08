@@ -106,6 +106,11 @@ namespace dxvk {
     // The DWM scan-out primary: preserve normal OPTIMAL render-target
     // semantics and export its allocation as a DMA_BUF.
     bool DirectOptimalScanout = false;
+    // The exported OPTIMAL image will be imported by the KMD's transfer queue,
+    // whose copy commands consume it in GENERAL. Select GENERAL as the
+    // canonical layout at creation so both Vulkan instances use one exact
+    // external-memory layout contract.
+    bool KmdTransferSource = false;
   };
 
 

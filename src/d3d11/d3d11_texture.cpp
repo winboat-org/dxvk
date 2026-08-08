@@ -319,8 +319,16 @@ namespace dxvk {
     // it is going to be used by the game.
     if (imageInfo.tiling == VK_IMAGE_TILING_OPTIMAL && !isMultiPlane
      && (imageInfo.sharing.mode == DxvkSharedHandleMode::None
-      || (pHeliosCreate && pHeliosCreate->DirectOptimalScanout)))
-      imageInfo.layout = OptimizeLayout(imageInfo.usage);
+      || (pHeliosCreate && pHeliosCreate->DirectOptimalScanout))) {
+      // A DirectOptimal image normally uses the most specific canonical
+      // layout (SHADER_READ_ONLY_OPTIMAL for scan-out/snapshot usage). The KMD
+      // WindowedBlt importer, however, consumes its snapshot as a transfer
+      // source in GENERAL. Make that cross-instance contract true by
+      // construction instead of pairing mismatched queue-family barriers.
+      imageInfo.layout = pHeliosCreate && pHeliosCreate->KmdTransferSource
+        ? VK_IMAGE_LAYOUT_GENERAL
+        : OptimizeLayout(imageInfo.usage);
+    }
 
     // Check if we can actually create the image
     if (!CheckImageSupport(&imageInfo, imageInfo.tiling)) {
