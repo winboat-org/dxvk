@@ -1,7 +1,7 @@
-# Helios links these archives into an MSVC Rust cdylib, whose C/C++ bridge uses
-# the dynamic CRT. Keep the engine on /MD as well; /MT produces LNK2038 runtime
-# mismatches and duplicate CRT symbols when helios_umd.dll is linked.
-project('dxvk', ['c', 'cpp'], version : '3.0.2', meson_version : '>= 0.58', default_options : [ 'cpp_std=c++17', 'b_vscrt=md', 'warning_level=2' ])
+# Helios links these archives into an MSVC Rust cdylib whose merged UMD build
+# enables crt-static and compiles its C++ bridge with /MT. Keep the engine on
+# the same runtime; /MD produces LNK2038 mismatches at helios_umd.dll link time.
+project('dxvk', ['c', 'cpp'], version : '3.0.2', meson_version : '>= 0.58', default_options : [ 'cpp_std=c++17', 'b_vscrt=mt', 'warning_level=2' ])
 
 pkg = import('pkgconfig')
 cpu_family = target_machine.cpu_family()
