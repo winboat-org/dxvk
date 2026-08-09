@@ -153,7 +153,7 @@ namespace dxvk {
   
   Rc<DxvkCommandList> DxvkContext::endRecording(
     const VkDebugUtilsLabelEXT*       reason) {
-    this->endCurrentCommands();
+    this->endCurrentCommands(true);
     this->relocateQueuedResources();
 
     m_implicitResolves.cleanup(m_trackingId);
@@ -569,7 +569,7 @@ namespace dxvk {
         srcFormat ? srcFormat : dstImage->info().format);
     } else {
       copyBufferToImageHw(dstImage, dstSubresource, dstOffset, dstExtent,
-        srcBuffer, srcOffset, rowAlignment, sliceAlignment);
+        srcBuffer, srcOffset, rowAlignment, sliceAlignment, false);
     }
   }
   
@@ -582,16 +582,13 @@ namespace dxvk {
           VkImageSubresourceLayers srcSubresource,
           VkOffset3D            srcOffset,
           VkExtent3D            extent) {
-    // Helios consumer-side ordering AT COPY TIME: the list-start wait in
-    // refreshHeliosStagedImages re-reads the publish slot when the list
-    // BEGAN, which can predate the IddCx acquire this copy serves by a full
-    // consumer cycle — the wait then targets an old value, "succeeds", and
-    // the copy reads ring-stale content inside freshly-reported damage
-    // rects (the drag-trail ghosting, root-caused 2026-07-06). Here the
-    // acquire has already happened and the source buffer cannot be
-    // re-presented while the consumer holds it, so the slot value IS the
-    // acquired present's value — the exact wait target. No-op for
-    // non-imported sources and when the config disables the wait.
+    // Helios consumer-side ordering AT COPY TIME. Reading the publication
+    // earlier in a persistent refresh cycle can target an old value that
+    // "succeeds" while the copy sees ring-stale content inside new damage
+    // (the drag-trail ghosting, root-caused 2026-07-06). Here the acquire has
+    // already happened and the source cannot be re-presented while the
+    // consumer holds it, so the slot value is the acquired present's exact
+    // wait target. No-op for non-imported sources and when disabled.
     heliosPresentWaitBeforeRefresh(srcImage);
 
     if (this->copyImageClear(dstImage, dstSubresource, dstOffset, extent, srcImage, srcSubresource)
@@ -3650,7 +3647,8 @@ namespace dxvk {
     const Rc<DxvkBuffer>&       buffer,
           VkDeviceSize          bufferOffset,
           VkDeviceSize          bufferRowAlignment,
-          VkDeviceSize          bufferSliceAlignment) {
+          VkDeviceSize          bufferSliceAlignment,
+          bool                  heliosExternalOwnership) {
     VkDeviceSize dataSize = imageSubresource.layerCount * util::computeImageDataSize(
       image->info().format, imageExtent, imageSubresource.aspectMask);
 
@@ -3683,13 +3681,67 @@ namespace dxvk {
     if (cmdBuffer == DxvkCmdBuffer::ExecBuffer)
       endCurrentPass(true);
 
-    syncResources(cmdBuffer, accessBatch.size(), accessBatch.data());
+    if (unlikely(heliosExternalOwnership)) {
+      // This buffer is not an ordinary DXVK allocation. It is an exclusive,
+      // OPAQUE_FD import of the exact VkBuffer that the KMD releases to
+      // VK_QUEUE_FAMILY_EXTERNAL after each Present. Acquire it on the queue
+      // that will execute the copy, but leave the destination image on DXVK's
+      // normal hazard/layout path.
+      acquireResources(cmdBuffer, accessBatch.size(), accessBatch.data());
+      releaseResources(cmdBuffer, 1u, &accessBatch[1]);
+    } else {
+      syncResources(cmdBuffer, accessBatch.size(), accessBatch.data());
+    }
 
     auto bufferSlice = buffer->getSliceInfo(bufferOffset, dataSize);
+
+    auto transferExternalOwnership = [&] (bool acquire) {
+      const uint32_t queueFamily = cmdBuffer == DxvkCmdBuffer::SdmaBuffer
+        && m_device->hasDedicatedTransferQueue()
+          ? m_device->queues().transfer.queueFamily
+          : m_device->queues().graphics.queueFamily;
+
+      VkBufferMemoryBarrier2 barrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+      barrier.srcStageMask = acquire
+        ? VK_PIPELINE_STAGE_2_NONE
+        : VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+      barrier.srcAccessMask = acquire
+        ? VK_ACCESS_2_NONE
+        : VK_ACCESS_2_TRANSFER_READ_BIT;
+      barrier.dstStageMask = acquire
+        ? VK_PIPELINE_STAGE_2_TRANSFER_BIT
+        : VK_PIPELINE_STAGE_2_NONE;
+      barrier.dstAccessMask = acquire
+        ? VK_ACCESS_2_TRANSFER_READ_BIT
+        : VK_ACCESS_2_NONE;
+      barrier.srcQueueFamilyIndex = acquire
+        ? VK_QUEUE_FAMILY_EXTERNAL
+        : queueFamily;
+      barrier.dstQueueFamilyIndex = acquire
+        ? queueFamily
+        : VK_QUEUE_FAMILY_EXTERNAL;
+      barrier.buffer = bufferSlice.buffer;
+      // Match the KMD's full-allocation release range exactly. An external
+      // queue-family transfer is a resource ownership contract, not merely a
+      // visibility barrier for the subrange copied below.
+      barrier.offset = 0u;
+      barrier.size = buffer->info().size;
+
+      VkDependencyInfo dependency = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+      dependency.bufferMemoryBarrierCount = 1u;
+      dependency.pBufferMemoryBarriers = &barrier;
+      m_cmd->cmdPipelineBarrier(cmdBuffer, &dependency);
+    };
+
+    if (unlikely(heliosExternalOwnership))
+      transferExternalOwnership(true);
 
     copyImageBufferData<true>(cmdBuffer,
       image, imageSubresource, imageOffset, imageExtent, dstLayout,
       bufferSlice, bufferRowAlignment, bufferSliceAlignment);
+
+    if (unlikely(heliosExternalOwnership))
+      transferExternalOwnership(false);
   }
 
 
@@ -9382,7 +9434,7 @@ namespace dxvk {
   }
 
 
-  void DxvkContext::endCurrentCommands() {
+  void DxvkContext::endCurrentCommands(bool finalizingForSubmit) {
     endCurrentPass(true);
 
     prepareSharedImages();
@@ -9405,6 +9457,14 @@ namespace dxvk {
     }
 
     releaseSharedImagesToExternal();
+
+    // Refresh staged surfaces only after this list's touches have joined the
+    // persistent set, and only while endRecording is closing a list that its
+    // caller submits immediately. splitCommands/beginExternalRendering also
+    // end a command chunk but do not submit it, so claiming there could leave
+    // KMD waiting on a consumer timeline value in an idle list.
+    if (finalizingForSubmit)
+      refreshHeliosStagedImages();
 
     m_sdmaAcquires.finalize(m_cmd);
     m_sdmaBarriers.finalize(m_cmd);
@@ -9606,11 +9666,64 @@ namespace dxvk {
   }
 
 
+  bool DxvkContext::claimHeliosPresentBufferRead(
+          uint32_t          resid,
+          Rc<DxvkFence>&    batchFence,
+          uint64_t&         batchValue) {
+    if (!resid || m_heliosPresentBufferFailed)
+      return false;
+
+    if (m_heliosPresentBufferFence == nullptr) {
+      try {
+        DxvkFenceCreateInfo info = { };
+        info.initialValue = 0u;
+        info.sharedType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        m_heliosPresentBufferFence = m_device->createFence(info);
+      } catch (const DxvkError& e) {
+        Logger::err(str::format("present-buffer-sync: consumer timeline creation failed: ",
+          e.message()));
+        m_heliosPresentBufferFailed = true;
+        return false;
+      }
+
+      if (!helios_acquire::registerPresentBufferStream(
+            m_device->handle(), m_heliosPresentBufferFence->handle())) {
+        Logger::err("present-buffer-sync: consumer timeline registration failed");
+        m_heliosPresentBufferFence = nullptr;
+        m_heliosPresentBufferFailed = true;
+        return false;
+      }
+    }
+
+    const bool existingBatch = batchFence != nullptr;
+    if (!existingBatch && m_heliosPresentBufferValue == ~0u) {
+      Logger::err("present-buffer-sync: consumer timeline value exhausted");
+      m_heliosPresentBufferFailed = true;
+      return false;
+    }
+
+    const uint32_t value = existingBatch
+      ? static_cast<uint32_t>(batchValue)
+      : m_heliosPresentBufferValue + 1u;
+    if (!value || (existingBatch
+        && (batchFence != m_heliosPresentBufferFence || batchValue != value)))
+      return false;
+
+    if (!helios_acquire::claimPresentBufferRead(
+          m_device->handle(), m_heliosPresentBufferFence->handle(), resid, value))
+      return false;
+
+    if (!existingBatch) {
+      m_heliosPresentBufferValue = value;
+      batchFence = m_heliosPresentBufferFence;
+      batchValue = value;
+    }
+    return true;
+  }
+
+
   void DxvkContext::heliosPresentWaitBeforeRefresh(const Rc<DxvkImage>& image) {
     const int32_t waitUs = m_device->config().heliosPresentWaitUs;
-
-    if (waitUs <= 0)
-      return;
 
     // Only reads of surfaces THIS process imported are consumer reads; the
     // creator's own refresh enrollments (dwm's GDI staging) must never pick
@@ -9647,6 +9760,11 @@ namespace dxvk {
       return;
     }
 
+    // This optional producer-timeline wait is a freshness hint for legacy
+    // imported images. It is not the KMD Present-buffer ownership handshake.
+    if (waitUs <= 0)
+      return;
+
     const auto t0 = dxvk::high_resolution_clock::now();
     const VkResult vr = fence->waitBounded(value, uint64_t(waitUs) * 1000u);
     const auto t1 = dxvk::high_resolution_clock::now();
@@ -9656,15 +9774,11 @@ namespace dxvk {
       std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
 
     if (vr != VK_SUCCESS) {
-      // Copy anyway — a rare one-frame ghost self-heals at the next acquire;
-      // wedging the IDD never does. VK_TIMEOUT here with a healthy producer
-      // means the wait budget is too small for real GPU work; anything else
-      // is a broken retire chain and must stay loud.
       m_heliosPresentWaitTimeouts += 1u;
       Logger::warn(str::format("Helios present-wait: resid ", resid,
         " value ", value, " NOT reached (", vr, ", fence at ",
         fence->getValue(), ") within ", waitUs,
-        "us — copying anyway (x", m_heliosPresentWaitTimeouts, ")"));
+        "us — ordering not proven (x", m_heliosPresentWaitTimeouts, ")"));
     }
 
     if ((m_heliosPresentWaits % 128u) == 0u) {
@@ -9676,6 +9790,7 @@ namespace dxvk {
         " gate_flushes=", HeliosPresentSync::gateFlushCount(),
         " refresh_skips=", m_heliosRefreshSkips));
     }
+
   }
 
 
@@ -10003,18 +10118,21 @@ namespace dxvk {
 
 
   void DxvkContext::refreshHeliosStagedImages() {
-    // Helios GDI staging (approach A): before this command list samples the
-    // staged shared surfaces it consumed in the previous list, copy the
-    // creator's latest host-visible bytes into each private device-local
-    // sampled image. The kernel GDI executor writes 4 bytes/texel at a
+    // Helios GDI staging (approach A): after this command list's samples and
+    // immediately before it is finalized, copy the creator's latest
+    // host-visible bytes into each persistent private device-local image. The
+    // submission therefore prepares the image for the next list while every
+    // accepted ownership claim is guaranteed to ride a submitted list. The
+    // kernel GDI executor writes 4 bytes/texel at a
     // round_up(width*4,256) byte stride, so a row alignment of the
     // cross-adapter pitch alignment (256) reproduces that exact source pitch
     // inside copyImageBufferData (rowPitch := align(width*4,256),
     // bufferRowLength := rowPitch/4). The copy reconciles pitch (row length),
     // tiling (OPTIMAL target) and memory domain (device-local target) at once.
     //
-    // Coherence caveat: the executor writes the BAR concurrently, so a torn
-    // read here is a possible minor transient — acceptable for now.
+    // Legacy staging allocations retain their historical freshness policy.
+    // Dedicated Present buffers use an explicit KMD<->consumer ownership
+    // handshake below, so neither side can access them concurrently.
     //
     // Pitch: host-visible executor surfaces use a 256-byte row alignment; a
     // device-local venus blob is stored TIGHT (width*elementSize), so it carries
@@ -10036,6 +10154,13 @@ namespace dxvk {
     // Prune surfaces that have not been sampled for a while — they re-enroll
     // on the next touch. Keeps the per-list copy cost bounded to live surfaces.
     constexpr uint32_t HeliosStagedIdleLimit  = 3600u;
+
+    // Every dedicated Present buffer claimed by this command list is tagged
+    // with one shared timeline value. The signal is recorded after all of its
+    // acquire/copy/release commands, so KMD cannot begin the next write until
+    // this exact Vulkan submission retires.
+    Rc<DxvkFence> presentBufferFence = nullptr;
+    uint64_t presentBufferValue = 0u;
 
     for (auto entry = m_heliosStagedRefresh.begin(); entry != m_heliosStagedRefresh.end(); ) {
       const auto& image = entry->image;
@@ -10121,19 +10246,48 @@ namespace dxvk {
           stagingImage, subresource, VkOffset3D { 0, 0, 0 },
           image->mipLevelExtent(0u));
       } else {
-        // Host-visible staging v1: copyBufferToImage carries no consumer
-        // wait of its own (buffers have no sharing identity), so the
-        // list-start wait on the IMAGE stays the orderer for this variant.
-        heliosPresentWaitBeforeRefresh(image);
-        copyBufferToImage(image, subresource,
-          VkOffset3D { 0, 0, 0 }, image->mipLevelExtent(0u),
-          staging, 0u, image->heliosStagedRowAlign(), 0u,
-          image->info().format);
+        const bool dedicatedPresentBuffer =
+          image->info().sharing.heliosDedicatedPresentBuffer;
+
+        if (dedicatedPresentBuffer) {
+          // This escape atomically changes ExternalReady -> Consumer(tag).
+          // BUSY means KMD has not completed its write/release yet; retain the
+          // enrollment and retry without recording an unmatched acquire.
+          if (!claimHeliosPresentBufferRead(
+                image->info().sharing.heliosResourceId,
+                presentBufferFence, presentBufferValue)) {
+            m_heliosRefreshSkips += 1u;
+            ++entry;
+            continue;
+          }
+        } else {
+          // The old image-compatible buffer ABI has no bidirectional ownership
+          // protocol. Preserve its producer freshness wait without pretending
+          // that the HPS timeline is a Vulkan queue-family transfer proof.
+          heliosPresentWaitBeforeRefresh(image);
+        }
+
+        // The KMD/DXVK external buffer contract intentionally contains only
+        // transfer usage. Keep this path on vkCmdCopyBufferToImage so the
+        // acquire/read/release ownership cycle has one exact synchronization
+        // scope; a shader fallback would require a differently-created buffer.
+        if (formatsAreBufferCopyCompatible(image->info().format, image->info().format)
+         && image->info().sampleCount == VK_SAMPLE_COUNT_1_BIT) {
+          copyBufferToImageHw(image, subresource,
+            VkOffset3D { 0, 0, 0 }, image->mipLevelExtent(0u),
+            staging, 0u, image->heliosStagedRowAlign(), 0u,
+            dedicatedPresentBuffer);
+        } else {
+          Logger::err("DxvkContext: Helios external staging buffer cannot use "
+            "the shader copy fallback; disabling refresh for this surface");
+          entry = m_heliosStagedRefresh.erase(entry);
+          continue;
+        }
       }
 
       // Stamp the producer value this refresh observed: the bind-time
       // staleness gate compares the live slot against this to decide
-      // whether a flush (hence a re-stage at the next list start) is needed
+      // whether a flush (hence a re-stage at that submitted list's tail) is needed
       // before sampling. Consumer freshness must track producer progress,
       // not command-list cadence — an idle process's chunks can span many
       // frames (root cause of the frozen-frame alternation, 27th session).
@@ -10222,12 +10376,15 @@ namespace dxvk {
 
         if (stagingImage != nullptr)
           issueProbe("alias-detile", nullptr, stagingImage);
-        else
+        else if (!image->info().sharing.heliosDedicatedPresentBuffer)
           issueProbe("buffer-raw", staging, nullptr);
       }
 
       ++entry;
     }
+
+    if (presentBufferFence != nullptr)
+      m_cmd->signalFence(std::move(presentBufferFence), presentBufferValue);
 
     // Harvest matured probes: map the readback buffer and characterize the
     // blob's raw bytes. ZERO (or alpha-only 0xFF at every 4th byte would still
@@ -10536,9 +10693,9 @@ namespace dxvk {
     m_sharedImagesTouched.clear();
 
     // Helios GDI staging: merge the staged images sampled this list into the
-    // PERSISTENT refresh set (reset idle age if already enrolled). Every
-    // subsequent list start refreshes them until they go idle, so a same-list
-    // sample can never read pre-update bytes (see dxvk_context.h).
+    // PERSISTENT refresh set (reset idle age if already enrolled). The caller
+    // refreshes that set at this list's tail, after its samples and immediately
+    // before submission, preparing the private images for the next list.
     for (auto& image : m_heliosStagedTouched) {
       bool found = false;
 
@@ -10610,9 +10767,6 @@ namespace dxvk {
 
     m_sharedImagesReleased.clear();
 
-    // Helios GDI staging: copy fresh executor bytes into the staged surfaces
-    // sampled by the previous command list, before this list samples them.
-    refreshHeliosStagedImages();
   }
 
 
@@ -10978,7 +11132,7 @@ namespace dxvk {
       trackSharedImageTouched(image);
 
     // Helios GDI staging: a sampler read of a staged image arms it for a
-    // buffer->image refresh at the next command-list start (see
+    // buffer->image refresh at this submitted command list's tail (see
     // refreshHeliosStagedImages). Our own copy is a write, so it does not
     // re-arm — refresh stops once nothing samples the surface.
     if (unlikely(image.isHeliosGdiStaged()) && (srcAccess & vk::AccessReadMask))

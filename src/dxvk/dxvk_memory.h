@@ -62,6 +62,7 @@ namespace dxvk {
     uint32_t     heliosResourceId       = 0u;
     VkDeviceSize heliosAllocSize        = 0u;
     uint32_t     heliosMemoryTypeIndex  = ~0u;
+    bool         heliosDedicatedPresentBuffer = false;
   };
 
 

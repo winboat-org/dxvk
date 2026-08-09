@@ -66,6 +66,13 @@ namespace dxvk {
      */
     uint32_t residFromMemory(VkDeviceMemory memory);
 
+    /** Register a dedicated external timeline for Present-buffer consumers. */
+    bool registerPresentBufferStream(VkDevice device, VkSemaphore semaphore);
+
+    /** Atomically claim one KMD Present buffer until `value` is signaled. */
+    bool claimPresentBufferRead(
+      VkDevice device, VkSemaphore semaphore, uint32_t resid, uint32_t value);
+
   }
 
   /**

@@ -478,14 +478,26 @@ namespace dxvk {
     const bool heliosHostVisibleImport = heliosImportCandidate
      && m_allocator->isHostVisibleMemoryType(m_info.sharing.heliosMemoryTypeIndex);
 
+    const bool heliosDedicatedPresentBuffer =
+      m_info.sharing.heliosDedicatedPresentBuffer;
+    const bool heliosBufferCopyFormat =
+      lookupFormatInfo(m_info.format)->elementSize == 4u;
+
+    // A dedicated-buffer export cannot legally back any VkImage. The typed KMD
+    // identity therefore turns every staging precondition into a hard contract:
+    // if exact buffer reconstruction is unavailable, fail OpenSharedResource
+    // cleanly instead of falling through to an invalid image bind.
+    if (heliosDedicatedPresentBuffer
+     && (!heliosHostVisibleImport || !heliosBufferCopyFormat)) {
+      throw DxvkError("DxvkImage: dedicated Helios Present buffer cannot be reconstructed");
+    }
+
     if (heliosHostVisibleImport
-     && lookupFormatInfo(m_info.format)->elementSize == 4u) {
-      // Best-effort: ANY failure here — importVenusStagingBuffer returning null
-      // OR throwing — must fall through to the direct host-visible import path
-      // below, never fail this texture's creation. A failed OpenSharedResource
-      // crash-loops dwm (0x8898008d fail-fast); a sheared-but-present fallback
-      // is strictly better. The staged path is committed to (flags flipped)
-      // only after every fallible step has succeeded.
+     && heliosBufferCopyFormat) {
+      // Legacy host-visible image exports retain their best-effort direct-image
+      // fallback. A typed dedicated Present buffer has no such legal fallback;
+      // propagate any setup failure to the UMD so it can fail the open without
+      // ever binding buffer-dedicated memory to an image.
       try {
         auto stagingAlloc = m_allocator->importVenusStagingBuffer(
           m_info.sharing.heliosAllocSize,
@@ -495,7 +507,10 @@ namespace dxvk {
         if (stagingAlloc) {
           DxvkBufferCreateInfo bufferInfo = { };
           bufferInfo.size   = m_info.sharing.heliosAllocSize;
-          bufferInfo.usage  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+          // TRANSFER_DST is unused by the consumer, but describes the exact
+          // KMD-created buffer whose dedicated external memory we imported.
+          bufferInfo.usage  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                            | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
           bufferInfo.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
           bufferInfo.access = VK_ACCESS_TRANSFER_READ_BIT;
 
@@ -520,10 +535,16 @@ namespace dxvk {
           Logger::info(str::format("DxvkImage: GDI staging enabled (", m_info.extent.width,
             "x", m_info.extent.height, ", resid ", m_info.sharing.heliosResourceId, ")"));
         } else {
-          Logger::warn("DxvkImage: GDI staging buffer import failed, "
+          if (heliosDedicatedPresentBuffer)
+            throw DxvkError("DxvkImage: dedicated Helios Present buffer import failed");
+
+          Logger::warn("DxvkImage: legacy GDI staging buffer import failed, "
             "falling back to direct host-visible image import");
         }
       } catch (const DxvkError& e) {
+        if (heliosDedicatedPresentBuffer)
+          throw;
+
         Logger::warn(str::format("DxvkImage: GDI staging setup failed, "
           "falling back to direct import: ", e.message()));
         m_heliosStagingBuffer = nullptr;
@@ -578,6 +599,9 @@ namespace dxvk {
         m_heliosGdiStaged = false;
       }
     }
+
+    if (heliosDedicatedPresentBuffer && !m_heliosGdiStaged)
+      throw DxvkError("DxvkImage: dedicated Helios Present buffer staging was not established");
 
     // Helios magenta LOCALIZATION diagnostic (13th session): when HELIOS_DEBUG_MAGENTA
     // is set, take the DEVICE-LOCAL cross-process shared import (firefox/wallpaper/icons —

@@ -90,6 +90,7 @@ namespace dxvk {
         imageInfo.sharing.heliosResourceId      = pHeliosImport->ResourceId;
         imageInfo.sharing.heliosAllocSize       = pHeliosImport->AllocSize;
         imageInfo.sharing.heliosMemoryTypeIndex = pHeliosImport->MemoryTypeIndex;
+        imageInfo.sharing.heliosDedicatedPresentBuffer = pHeliosImport->DedicatedPresentBuffer;
 
         // Symmetric scan-out-primary import: reconstruct the creator's exact
         // plain LINEAR + DMA_BUF image. Import mode is preserved, and ordinary

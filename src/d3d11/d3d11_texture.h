@@ -93,6 +93,9 @@ namespace dxvk {
     // KMD-created D3DKMDT_GDISURFACE_TEXTURE: preserve the creator's
     // OPTIMAL+DMA_BUF cross-context image contract.
     bool     CrossContextOptimal = false;
+    // The external memory was exported as a dedicated allocation for the exact
+    // KMD Present buffer. It must never fall back to an image import.
+    bool     DedicatedPresentBuffer = false;
   };
 
 

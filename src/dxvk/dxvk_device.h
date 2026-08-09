@@ -164,7 +164,7 @@ namespace dxvk {
     DxvkHeliosScanoutAcquire& heliosScanoutAcquire() {
       return m_heliosScanoutAcquire;
     }
-    
+
     /**
      * \brief Queue handles
      * 
@@ -802,7 +802,6 @@ namespace dxvk {
     DxvkSubmissionQueue         m_submissionQueue;
 
     DxvkHeliosScanoutAcquire    m_heliosScanoutAcquire;
-
     Rc<DxvkShaderCache>         m_shaderCache;
 
     DxvkDevicePerfHints getPerfHints();
