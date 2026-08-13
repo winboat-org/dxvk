@@ -189,14 +189,16 @@ namespace dxvk {
     /**
      * \brief Helios: ordered snapshot copy for the D4b scanout ring
      *
-     * Records a full-subresource copyImage of the presented primary into a
+     * Records a full-subresource copy of the presented primary into a
      * snapshot-ring image on the open command list, at present position, so
      * the copy rides the frame's own command stream: it executes after the
      * frame's draws and before anything of frame N+1 (queue order — no waits,
      * no stalls). A full-extent OPTIMAL->OPTIMAL same-format copy takes
      * DxvkContext::copyImageHw, which handles the layout transitions
      * internally, and the copy-time consumer present-wait no-ops for
-     * non-import sources, so no consumer wait is armed here. The destination
+     * non-import sources, so no consumer wait is armed here. When the ring's
+     * scan-out-safe format differs from the primary, this uses the explicit
+     * numeric framebuffer conversion rather than a raw bit copy. The destination
      * is a scanout-flagged image, so heliosEmitScanoutReuseWaits gates this
      * list on any still-in-flight host readback of the slot (the D4a acquire
      * as the snapshot-overwrite backstop).
@@ -206,6 +208,22 @@ namespace dxvk {
       const Rc<DxvkImage>&        SrcImage,
             VkExtent3D            Extent,
             bool                  WindowedBltReservation);
+
+    /**
+     * \brief Helios: format-converting DXGI blit
+     *
+     * Records an explicit framebuffer conversion instead of D3D11's regular
+     * CopySubresourceRegion bit copy. The caller has already validated that
+     * both operands are single-sampled color images and that the region fits.
+     */
+    void HeliosConvertImage(
+      const Rc<DxvkImage>&        DstImage,
+            VkImageSubresourceLayers DstSubresource,
+            VkOffset3D            DstOffset,
+      const Rc<DxvkImage>&        SrcImage,
+            VkImageSubresourceLayers SrcSubresource,
+            VkOffset3D            SrcOffset,
+            VkExtent3D            Extent);
 
     /**
      * \brief Helios: inject a command ordered after all recorded work

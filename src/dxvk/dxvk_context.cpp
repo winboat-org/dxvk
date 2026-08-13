@@ -619,6 +619,74 @@ namespace dxvk {
     if (dstImage->info().sampleCount > VK_SAMPLE_COUNT_1_BIT)
       m_implicitResolves.invalidate(*dstImage, vk::makeSubresourceRange(dstSubresource));
   }
+
+
+  void DxvkContext::copyImageConverted(
+    const Rc<DxvkImage>&        dstImage,
+          VkImageSubresourceLayers dstSubresource,
+          VkOffset3D            dstOffset,
+    const Rc<DxvkImage>&        srcImage,
+          VkImageSubresourceLayers srcSubresource,
+          VkOffset3D            srcOffset,
+          VkExtent3D            extent) {
+    // Keep the same import-ordering contract as copyImage. DXGI Blt normally
+    // operates on local resources, but an opened composition surface is a
+    // valid operand and must not be sampled before its producer publication.
+    heliosPresentWaitBeforeRefresh(srcImage);
+
+    // copyImageFb is deliberately a COPY emulator: for two color images it
+    // creates source and destination views in the destination format. That is
+    // the wrong primitive here. Besides reinterpreting packed RGB10 words, an
+    // exported WDDM image cannot be relocated to add the foreign view format,
+    // so ensureImageCompatibility refuses it and the destination stays black.
+    //
+    // Native-format image views make blitImageView perform Vulkan's numeric
+    // blit conversion (or its shader fallback): sample R10G10B10A2 as
+    // R10G10B10A2_UNORM, then write the resulting values as RGBA8_UNORM.
+    DxvkImageViewKey dstViewInfo = { };
+    dstViewInfo.viewType = DxvkMetaResolveViews::viewType(
+      *dstImage, dstSubresource, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    dstViewInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    dstViewInfo.format = dstImage->info().format;
+    dstViewInfo.aspects = dstSubresource.aspectMask;
+    dstViewInfo.mipIndex = dstSubresource.mipLevel;
+    dstViewInfo.mipCount = 1u;
+    dstViewInfo.layerIndex = dstSubresource.baseArrayLayer;
+    dstViewInfo.layerCount = dstSubresource.layerCount;
+
+    DxvkImageViewKey srcViewInfo = { };
+    srcViewInfo.viewType = DxvkMetaResolveViews::viewType(
+      *srcImage, srcSubresource, VK_IMAGE_USAGE_SAMPLED_BIT);
+    srcViewInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    srcViewInfo.format = srcImage->info().format;
+    srcViewInfo.aspects = srcSubresource.aspectMask;
+    srcViewInfo.mipIndex = srcSubresource.mipLevel;
+    srcViewInfo.mipCount = 1u;
+    srcViewInfo.layerIndex = srcSubresource.baseArrayLayer;
+    srcViewInfo.layerCount = srcSubresource.layerCount;
+
+    const VkOffset3D dstOffsets[2] = {
+      dstOffset,
+      VkOffset3D {
+        dstOffset.x + int32_t(extent.width),
+        dstOffset.y + int32_t(extent.height),
+        dstOffset.z + int32_t(extent.depth),
+      },
+    };
+    const VkOffset3D srcOffsets[2] = {
+      srcOffset,
+      VkOffset3D {
+        srcOffset.x + int32_t(extent.width),
+        srcOffset.y + int32_t(extent.height),
+        srcOffset.z + int32_t(extent.depth),
+      },
+    };
+
+    this->blitImageView(
+      dstImage->createView(dstViewInfo), dstOffsets,
+      srcImage->createView(srcViewInfo), srcOffsets,
+      VK_FILTER_NEAREST);
+  }
   
   
   void DxvkContext::copyImageRegion(

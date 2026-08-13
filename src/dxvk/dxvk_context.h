@@ -782,6 +782,24 @@ namespace dxvk {
             VkImageSubresourceLayers srcSubresource,
             VkOffset3D            srcOffset,
             VkExtent3D            extent);
+
+    /**
+     * \brief Numerically converts one color image region into another
+     *
+     * Unlike \ref copyImage, this creates native-format views and takes the
+     * numeric blit path. That distinction is load-bearing for DXGI Blt:
+     * equal-sized color formats are legal Vulkan copy-compatible formats,
+     * but a raw copy would preserve packed bits instead of converting values
+     * (for example R10G10B10A2 into RGBA8).
+     */
+    void copyImageConverted(
+      const Rc<DxvkImage>&        dstImage,
+            VkImageSubresourceLayers dstSubresource,
+            VkOffset3D            dstOffset,
+      const Rc<DxvkImage>&        srcImage,
+            VkImageSubresourceLayers srcSubresource,
+            VkOffset3D            srcOffset,
+            VkExtent3D            extent);
     
     /**
      * \brief Copies overlapping image region
