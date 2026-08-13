@@ -232,18 +232,25 @@ namespace dxvk {
     }
 
     // Helios copy-free cross-process fix (13th session): a shared OPTIMAL image
-    // and its cross-process importer alias one host allocation, but NVIDIA color
-    // compression (DCC) keeps a PER-IMAGE compression-control surface that is NOT
-    // carried across the OPAQUE_FD share — so the importer decodes the exporter's
-    // compressed bytes with empty metadata and samples black (the black desktop),
-    // even though every VkImageCreateInfo field matches. Dropping the view-format
-    // list (while KEEPING VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT so sRGB/UNORM views
-    // still work) forces the driver to store the image uncompressed: the raw
-    // pixels then live directly in the shared memory and the matching-create-info
-    // importer reads them with NO per-frame copy. Applied to both endpoints (this
-    // is the single InitImageInfo both the exporter and importer run through), so
-    // creator and opener stay byte-identical.
-    if (imageInfo.shared && (imageInfo.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
+    // and its cross-process importer alias one host allocation, but host color-
+    // compression metadata may be per-image and not carried across the OPAQUE_FD
+    // share. The importer can then decode the exporter's compressed bytes without
+    // matching metadata and sample black, even though every VkImageCreateInfo
+    // field matches. On the affected driver, dropping the view-format list while
+    // keeping VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT is observed to disable image
+    // compression, leaving raw pixels in shared memory. Applied to both endpoints
+    // (this is the single InitImageInfo both the exporter and importer run through),
+    // creator and opener stay byte-identical without a per-frame copy.
+    //
+    // Multi-plane formats are deliberately excluded. DXVK keeps their compatible
+    // plane formats as internal D3D11 metadata so it can approve the corresponding
+    // plane views. It deliberately does not pass VkImageFormatListCreateInfo for
+    // planar VkImages, so preserving this metadata does not change the host image
+    // creation or compression behavior. Without it, OBS rejects the R8/R8G8 views
+    // of its shared NV12 startup self-test texture.
+    if (imageInfo.shared
+     && !isMultiPlane
+     && (imageInfo.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
       imageInfo.viewFormatCount = 0;
       imageInfo.viewFormats     = nullptr;
     }
