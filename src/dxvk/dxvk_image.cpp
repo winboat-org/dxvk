@@ -310,6 +310,7 @@ namespace dxvk {
 
   bool DxvkImage::canRelocate() const {
     return !m_imageInfo.mapPtr && !m_shared && !m_stableAddress
+        && !m_info.heliosAssociation.outer_allocation_token
         && !(m_info.flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT);
   }
 
@@ -437,9 +438,14 @@ namespace dxvk {
     // only bind a VkDeviceMemory to a HOST3D blob if that memory was allocated
     // as exportable. Use Venus' renderer-side opaque-fd handle type for the
     // Vulkan pNext chain while suppressing DXVK's Win32 handle retrieval below.
+    const bool heliosOuterAssociated =
+      m_info.heliosAssociation.outer_allocation_token != 0u;
     const bool heliosKmtShared = heliosKmtOnlySharedResources();
-    bool useVulkanExternalMemory = m_shared && !heliosKmtShared;
-    bool useHeliosRendererExternalMemory = m_shared && heliosKmtShared;
+    // An associated image obtains the KMD-owned host backing through Mesa's
+    // deferred allocation record. It must not also take the retired renderer
+    // export/import path, which would create two unrelated backing identities.
+    bool useVulkanExternalMemory = m_shared && !heliosOuterAssociated && !heliosKmtShared;
+    bool useHeliosRendererExternalMemory = m_shared && !heliosOuterAssociated && heliosKmtShared;
     // Scan-out surfaces use DMA_BUF; ordinary shared surfaces retain the
     // renderer opaque-fd handle. Both externalInfo.handleTypes and
     // sharedExport.handleTypes key off this.
@@ -649,7 +655,8 @@ namespace dxvk {
     allocationInfo.resourceCookie = cookie();
     allocationInfo.properties = m_properties;
     allocationInfo.mode = mode;
-    allocationInfo.forceDedicated = m_shared && heliosKmtShared;
+    allocationInfo.forceDedicated =
+      heliosOuterAssociated || (m_shared && heliosKmtShared);
 
     if (useHeliosRendererExternalMemory && m_info.sharing.mode == DxvkSharedHandleMode::Import) {
       // Import with the creator's exact venus allocation size and memory type
@@ -662,6 +669,13 @@ namespace dxvk {
 
     if (m_info.transient)
       allocationInfo.mode.set(DxvkAllocationMode::NoDedicated);
+
+    HeliosResourceAssociationV1 association = m_info.heliosAssociation;
+    if (heliosOuterAssociated) {
+      association.p_next = sharedMemoryInfo;
+      sharedMemoryInfo = &association;
+      allocationInfo.heliosAssociation = &association;
+    }
 
     return m_allocator->createImageResource(imageInfo,
       allocationInfo, sharedMemoryInfo);

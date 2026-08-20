@@ -49,17 +49,47 @@ namespace dxvk::vk {
     m_getInstanceProcAddr = loaderProc;
   }
 
+  LibraryLoader::LibraryLoader(PFN_vkGetInstanceProcAddr loaderProc,
+                               VkInstance lookupInstance,
+                               HMODULE expectedModule)
+  : m_getInstanceProcAddr(loaderProc),
+    m_lookupInstance(lookupInstance),
+    m_expectedModule(expectedModule) { }
+
   LibraryLoader::~LibraryLoader() {
     if (m_library)
       FreeLibrary(m_library);
   }
 
   PFN_vkVoidFunction LibraryLoader::sym(VkInstance instance, const char* name) const {
-    return m_getInstanceProcAddr(instance, name);
+    if (!m_getInstanceProcAddr)
+      return nullptr;
+    PFN_vkVoidFunction proc = m_getInstanceProcAddr(instance, name);
+#ifdef _WIN32
+    if (proc && !ownsProc(proc))
+      return nullptr;
+#endif
+    return proc;
+  }
+
+
+  bool LibraryLoader::ownsProc(PFN_vkVoidFunction proc) const {
+#ifdef _WIN32
+    if (proc && m_expectedModule) {
+      HMODULE owner = nullptr;
+      if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(proc), &owner) ||
+          owner != m_expectedModule)
+        return false;
+    }
+#endif
+    return true;
   }
 
   PFN_vkVoidFunction LibraryLoader::sym(const char* name) const {
-    return sym(nullptr, name);
+    return sym(m_lookupInstance, name);
   }
 
   
@@ -80,13 +110,20 @@ namespace dxvk::vk {
   
   
   PFN_vkVoidFunction DeviceLoader::sym(const char* name) const {
-    return m_getDeviceProcAddr(m_device, name);
+    if (!m_getDeviceProcAddr)
+      return nullptr;
+    PFN_vkVoidFunction proc = m_getDeviceProcAddr(m_device, name);
+    return m_library->ownsProc(proc) ? proc : nullptr;
   }
   
   
   LibraryFn::LibraryFn() { }
   LibraryFn::LibraryFn(PFN_vkGetInstanceProcAddr loaderProc)
   : LibraryLoader(loaderProc) { }
+  LibraryFn::LibraryFn(PFN_vkGetInstanceProcAddr loaderProc,
+                       VkInstance lookupInstance,
+                       HMODULE expectedModule)
+  : LibraryLoader(loaderProc, lookupInstance, expectedModule) { }
   LibraryFn::~LibraryFn() { }
   
   

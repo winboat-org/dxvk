@@ -14,6 +14,7 @@ namespace dxvk {
   
   class DxvkDevice;
   class DxvkInstance;
+  struct DxvkHeliosOuterOps;
 
   using DxvkQueueCallback = std::function<void (bool)>;
 
@@ -234,6 +235,10 @@ namespace dxvk {
      * \returns Device handle
      */
     Rc<DxvkDevice> createDevice();
+
+    /** Creates the record-only device with its immutable outer UMD edge. */
+    Rc<DxvkDevice> createDevice(
+      const DxvkHeliosOuterOps& heliosOuterOps);
     
     /**
      * \brief Imports a foreign device
@@ -330,7 +335,8 @@ namespace dxvk {
 
     std::array<DxvkAdapterMemoryStats, VK_MAX_MEMORY_HEAPS> m_memoryStats = { };
 
-    Rc<DxvkDevice> createDevice(bool safeMode);
+    Rc<DxvkDevice> createDevice(bool safeMode,
+      const DxvkHeliosOuterOps* heliosOuterOps);
 
   };
   

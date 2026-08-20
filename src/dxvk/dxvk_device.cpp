@@ -23,7 +23,8 @@ namespace dxvk {
     const Rc<vk::DeviceFn>&         vkd,
     const DxvkDeviceCapabilities&   caps,
     const DxvkDeviceQueueSet&       queues,
-    const DxvkQueueCallback&        queueCallback)
+    const DxvkQueueCallback&        queueCallback,
+    const DxvkHeliosOuterOps&       heliosOuterOps)
   : m_options           (instance->options()),
     m_instance          (instance),
     m_adapter           (adapter),
@@ -32,6 +33,7 @@ namespace dxvk {
     m_queues            (queues),
     m_features          (caps.getFeatures()),
     m_properties        (caps.getProperties()),
+    m_heliosOuterOps    (heliosOuterOps),
     m_perfHints         (getPerfHints()),
     m_objects           (this),
     m_checkpoints       (this),
@@ -93,6 +95,124 @@ namespace dxvk {
     // create probe devices before its workload device. Module detachment
     // returned above and never attempts file I/O.
     helios_feed::dump();
+  }
+
+
+  void* DxvkDevice::beginHeliosOuterSubmit() const {
+    if (!m_instance->isRecordOnlyDirect())
+      return reinterpret_cast<void*>(uintptr_t(1));
+    if (!m_heliosOuterOps)
+      return nullptr;
+    return m_heliosOuterOps.begin(m_heliosOuterOps.context);
+  }
+
+
+  VkResult DxvkDevice::finishHeliosOuterSubmit(
+          void*       scope,
+          VkResult    lowerResult) const {
+    if (!m_instance->isRecordOnlyDirect())
+      return lowerResult;
+    if (!scope || !m_heliosOuterOps)
+      return VK_ERROR_DEVICE_LOST;
+    return m_heliosOuterOps.finish(m_heliosOuterOps.context, scope, lowerResult);
+  }
+
+
+  VkResult DxvkDevice::joinHeliosOuterSubmit() const {
+    if (!m_instance->isRecordOnlyDirect())
+      return VK_SUCCESS;
+    if (!m_heliosOuterOps)
+      return VK_ERROR_DEVICE_LOST;
+    return m_heliosOuterOps.join(m_heliosOuterOps.context);
+  }
+
+
+  VkResult DxvkDevice::createHeliosOuterAllocation(
+          VkDeviceSize                  bytes,
+          VkMemoryPropertyFlags        memoryProperties,
+          HeliosResourceAssociationV1* association) const {
+    if (!m_instance->isRecordOnlyDirect())
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!bytes || !association || !m_heliosOuterOps)
+      return VK_ERROR_DEVICE_LOST;
+
+    *association = { };
+    VkResult result = m_heliosOuterOps.allocate(
+      m_heliosOuterOps.context,
+      bytes,
+      bool(memoryProperties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT),
+      bool(memoryProperties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+      association);
+    if (result != VK_SUCCESS
+     || !validateHeliosOuterAssociation(*association, bytes, memoryProperties)) {
+      const uint64_t deviceGeneration = association->device_generation;
+      const uint64_t outerAllocationToken = association->outer_allocation_token;
+      if (result == VK_SUCCESS && deviceGeneration && outerAllocationToken) {
+        void* scope = beginHeliosOuterAllocationTeardown(
+          deviceGeneration, outerAllocationToken);
+        VkResult teardownResult = scope
+          ? finishHeliosOuterSubmit(scope, VK_SUCCESS)
+          : VK_ERROR_DEVICE_LOST;
+        retireHeliosOuterAllocation(deviceGeneration,
+          outerAllocationToken, teardownResult);
+      }
+      *association = { };
+      return VK_ERROR_DEVICE_LOST;
+    }
+    return VK_SUCCESS;
+  }
+
+
+  bool DxvkDevice::validateHeliosOuterAssociation(
+    const HeliosResourceAssociationV1& association,
+          VkDeviceSize                 bytes,
+          VkMemoryPropertyFlags        memoryProperties) const {
+    const bool hostVisible = memoryProperties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    const bool hasCpuMapping = (association.association_flags
+      & HELIOS_RESOURCE_ASSOCIATION_FLAG_CPU_MAPPING) != 0;
+    const uintptr_t cpuMapping = reinterpret_cast<uintptr_t>(association.cpu_mapping);
+
+    return bytes
+     && association.s_type == HELIOS_RESOURCE_ASSOCIATION_STRUCTURE_TYPE
+     && association.struct_bytes == HELIOS_RESOURCE_ASSOCIATION_BYTES
+     && association.abi_version == HELIOS_RESOURCE_ASSOCIATION_ABI_VERSION
+     && !association.reserved
+     && association.package_generation == HELIOS_PACKAGE_GENERATION
+     && association.device_generation
+     && association.outer_allocation_token
+     && association.outer_allocation_bytes >= bytes
+     && !(association.association_flags & ~HELIOS_RESOURCE_ASSOCIATION_FLAG_MASK)
+     && !association.reserved1
+     && (!!association.cpu_mapping == hasCpuMapping)
+     && (!hostVisible || hasCpuMapping)
+     && (!hasCpuMapping || (!(cpuMapping & 4095u)
+       && association.outer_allocation_bytes
+          <= uint64_t(UINTPTR_MAX - cpuMapping)));
+  }
+
+
+  void* DxvkDevice::beginHeliosOuterAllocationTeardown(
+          uint64_t     deviceGeneration,
+          uint64_t     outerAllocationToken) const {
+    if (!m_instance->isRecordOnlyDirect()
+     || !deviceGeneration || !outerAllocationToken || !m_heliosOuterOps)
+      return nullptr;
+    return m_heliosOuterOps.teardownBegin(m_heliosOuterOps.context,
+      deviceGeneration, outerAllocationToken);
+  }
+
+
+  VkResult DxvkDevice::retireHeliosOuterAllocation(
+          uint64_t     deviceGeneration,
+          uint64_t     outerAllocationToken,
+          VkResult     teardownResult) const {
+    if (!m_instance->isRecordOnlyDirect())
+      return teardownResult;
+    if (!deviceGeneration || !outerAllocationToken
+     || !m_heliosOuterOps)
+      return VK_ERROR_DEVICE_LOST;
+    return m_heliosOuterOps.retire(m_heliosOuterOps.context,
+      deviceGeneration, outerAllocationToken, teardownResult);
   }
 
 
@@ -768,6 +888,12 @@ namespace dxvk {
   
   void DxvkDevice::waitForIdle() {
     m_submissionQueue.waitForIdle();
+
+    // The record-only submission queue already performed the one exact HQC1
+    // join and released the lists whose resource refs it protected.
+    if (m_instance->isRecordOnlyDirect())
+      return;
+
     m_submissionQueue.lockDeviceQueue();
 
     if (m_vkd->vkDeviceWaitIdle(m_vkd->device()) != VK_SUCCESS)

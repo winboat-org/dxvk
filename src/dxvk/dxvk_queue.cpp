@@ -8,8 +8,13 @@ namespace dxvk {
   : m_device        (device),
     m_checkpoints   (device->getCheckpointBuffer()),
     m_callback      (callback),
-    m_submitThread  ([this] () { submitCmdLists(); }),
-    m_finishThread  ([this] () { finishCmdLists(); }) {
+    m_recordOnly    (device->instance()->isRecordOnlyDirect()) {
+    if (m_recordOnly)
+      return;
+
+    m_submitThread = dxvk::thread([this] () { submitCmdLists(); });
+    m_finishThread = dxvk::thread([this] () { finishCmdLists(); });
+
     auto vk = m_device->vkd();
 
     VkSemaphoreTypeCreateInfo semaphoreType = { VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
@@ -30,6 +35,15 @@ namespace dxvk {
   DxvkSubmissionQueue::~DxvkSubmissionQueue() {
     auto vk = m_device->vkd();
 
+    if (m_recordOnly) {
+      // DxvkDevice normally joined before member destruction. Keep this
+      // bounded fallback for constructor unwinds where no D3D11 object could
+      // have submitted work yet.
+      if (!m_finishQueue.empty())
+        completeRecordOnlySubmissions();
+      return;
+    }
+
     { std::unique_lock<dxvk::mutex> lock(m_mutex);
       m_stopped.store(true);
     }
@@ -49,6 +63,66 @@ namespace dxvk {
           DxvkSubmitInfo            submitInfo,
           DxvkLatencyInfo           latencyInfo,
           DxvkSubmitStatus*         status) {
+    if (m_recordOnly) {
+      std::unique_lock<dxvk::mutex> queueLock(m_mutexQueue);
+
+      bool atCapacity = false;
+      {
+        std::unique_lock<dxvk::mutex> lock(m_mutex);
+        atCapacity = m_finishQueue.size() >= MaxNumQueuedCommandBuffers;
+      }
+
+      // Pool pressure is one of the explicit places where record-only DXVK
+      // may synchronously join the exact outer context.
+      if (atCapacity && completeRecordOnlySubmissionsLocked() != VK_SUCCESS) {
+        if (status)
+          status->result = VK_ERROR_DEVICE_LOST;
+        return;
+      }
+
+      DxvkSubmitEntry entry = { };
+      entry.status = status;
+      entry.submit = std::move(submitInfo);
+      entry.latency = std::move(latencyInfo);
+
+      if (m_lastError != VK_ERROR_DEVICE_LOST) {
+        if (m_callback)
+          m_callback(true);
+
+        if (entry.latency.tracker)
+          entry.latency.tracker->notifyQueueSubmit(entry.latency.frameId);
+
+        entry.result = entry.submit.cmdList != nullptr
+          ? entry.submit.cmdList->submit(m_semaphores, m_timelines, 0u)
+          : VK_SUCCESS;
+
+        if (m_callback)
+          m_callback(false);
+      } else {
+        entry.result = VK_ERROR_DEVICE_LOST;
+      }
+
+      if (entry.status)
+        entry.status->result = entry.result;
+
+      if (entry.result != VK_SUCCESS)
+        m_lastError = entry.result;
+
+      // Retain the whole list until an exact HQC1 join proves every accepted
+      // batch has retired. A failure may follow an earlier accepted sub-batch,
+      // so the failure path must retain it as well.
+      {
+        std::unique_lock<dxvk::mutex> lock(m_mutex);
+        if (entry.submit.cmdList != nullptr)
+          m_finishQueue.push(std::move(entry));
+        m_submitCond.notify_all();
+        m_finishCond.notify_all();
+      }
+
+      m_device->m_objects.memoryManager().performTimedTasks();
+      return;
+    }
+
     std::unique_lock<dxvk::mutex> lock(m_mutex);
 
     m_finishCond.wait(lock, [this] {
@@ -70,6 +144,13 @@ namespace dxvk {
           DxvkPresentInfo           presentInfo,
           DxvkLatencyInfo           latencyInfo,
           DxvkSubmitStatus*         status) {
+    if (m_recordOnly) {
+      Logger::err("DxvkSubmissionQueue: record-only WSI present refused before the present-layer cutover");
+      if (status)
+        status->result = VK_ERROR_EXTENSION_NOT_PRESENT;
+      return;
+    }
+
     std::unique_lock<dxvk::mutex> lock(m_mutex);
 
     DxvkSubmitEntry entry = { };
@@ -85,6 +166,9 @@ namespace dxvk {
 
   void DxvkSubmissionQueue::synchronizeSubmission(
           DxvkSubmitStatus*   status) {
+    if (m_recordOnly)
+      return;
+
     std::unique_lock<dxvk::mutex> lock(m_mutex);
 
     m_submitCond.wait(lock, [status] {
@@ -94,6 +178,9 @@ namespace dxvk {
 
 
   void DxvkSubmissionQueue::synchronize() {
+    if (m_recordOnly)
+      return;
+
     std::unique_lock<dxvk::mutex> lock(m_mutex);
 
     m_submitCond.wait(lock, [this] {
@@ -103,6 +190,11 @@ namespace dxvk {
 
 
   void DxvkSubmissionQueue::waitForIdle() {
+    if (m_recordOnly) {
+      completeRecordOnlySubmissions();
+      return;
+    }
+
     std::unique_lock<dxvk::mutex> lock(m_mutex);
 
     m_submitCond.wait(lock, [this] {
@@ -128,6 +220,51 @@ namespace dxvk {
       m_callback(false);
 
     m_mutexQueue.unlock();
+  }
+
+
+  VkResult DxvkSubmissionQueue::completeRecordOnlySubmissions() {
+    std::unique_lock<dxvk::mutex> queueLock(m_mutexQueue);
+    return completeRecordOnlySubmissionsLocked();
+  }
+
+
+  VkResult DxvkSubmissionQueue::completeRecordOnlySubmissionsLocked() {
+    VkResult result = m_device->joinHeliosOuterSubmit();
+
+    if (result != VK_SUCCESS)
+      m_lastError = result;
+
+    while (true) {
+      DxvkSubmitEntry entry = { };
+
+      {
+        std::unique_lock<dxvk::mutex> lock(m_mutex);
+        if (m_finishQueue.empty())
+          break;
+        entry = std::move(m_finishQueue.front());
+        m_finishQueue.pop();
+        m_finishCond.notify_all();
+      }
+
+      if (entry.submit.cmdList == nullptr)
+        continue;
+
+      if (result == VK_SUCCESS) {
+        if (entry.latency.tracker) {
+          entry.latency.tracker->notifyGpuExecutionBegin(entry.latency.frameId);
+          entry.latency.tracker->notifyGpuExecutionEnd(entry.latency.frameId);
+        }
+        entry.submit.cmdList->notifyObjects();
+        entry.submit.cmdList->reset();
+        m_device->recycleCommandList(entry.submit.cmdList);
+      } else {
+        m_leakedCmdLists.push_back(std::move(entry.submit.cmdList));
+      }
+    }
+
+    m_device->m_objects.memoryManager().performTimedTasks();
+    return result;
   }
 
 
@@ -313,7 +450,9 @@ namespace dxvk {
           if (entry.latency.tracker)
             entry.latency.tracker->notifyGpuExecutionBegin(entry.latency.frameId);
 
-          status = vk->vkWaitSemaphores(vk->device(), &waitInfo, ~0ull);
+          status = m_device->instance()->isRecordOnlyDirect()
+            ? m_device->joinHeliosOuterSubmit()
+            : vk->vkWaitSemaphores(vk->device(), &waitInfo, ~0ull);
           hostRetired = (status == VK_SUCCESS);
 
           if (entry.latency.tracker && status == VK_SUCCESS)
@@ -326,8 +465,10 @@ namespace dxvk {
           // vkResetCommandPool-in-use VUs during post-loss teardown). Give
           // the host a bounded grace to retire the work; leak the command
           // list below if it does not.
-          hostRetired = vk->vkWaitSemaphores(vk->device(), &waitInfo,
-            2'000'000'000ull) == VK_SUCCESS;
+          hostRetired = m_device->instance()->isRecordOnlyDirect()
+            ? m_device->joinHeliosOuterSubmit() == VK_SUCCESS
+            : vk->vkWaitSemaphores(vk->device(), &waitInfo,
+                2'000'000'000ull) == VK_SUCCESS;
         }
 
         if (status == VK_ERROR_DEVICE_LOST && m_checkpoints)

@@ -77,8 +77,12 @@ namespace dxvk {
     if (m_device->debugFlags().test(DxvkDebugFlag::Capture))
       m_features.set(DxvkContextFeature::DebugUtils);
 
-    // Create timeline semaphore for resource tracking IDs
-    m_trackingFence = m_device->createFence(DxvkFenceCreateInfo());
+    // Generic DXVK uses a private timeline to order command-list recycling.
+    // Record-only execution is ordered by the one outer engine and retires
+    // lists only after the exact HQC1 join, so creating that lower timeline
+    // would introduce a second completion domain.
+    if (!m_device->instance()->isRecordOnlyDirect())
+      m_trackingFence = m_device->createFence(DxvkFenceCreateInfo());
   }
   
   
@@ -204,11 +208,16 @@ namespace dxvk {
     heliosEmitImportedWaits();
 
     // If necessary, block any async queue on previous command completion
-    if (m_submitWaitId)
-      m_cmd->waitFence(m_trackingFence, std::exchange(m_submitWaitId, 0ull));
+    if (!m_device->instance()->isRecordOnlyDirect()) {
+      if (m_submitWaitId)
+        m_cmd->waitFence(m_trackingFence, std::exchange(m_submitWaitId, 0ull));
 
-    // Signal tracking timeline to current tracking ID
-    m_cmd->signalFence(m_trackingFence, m_trackingId);
+      // Signal tracking timeline to current tracking ID
+      m_cmd->signalFence(m_trackingFence, m_trackingId);
+    } else {
+      // Same-engine K9 ordering replaces the lower tracking semaphore.
+      m_submitWaitId = 0u;
+    }
     m_submitLastId = m_trackingId;
 
     // Flush pending descriptor updates and assign the sync

@@ -167,6 +167,17 @@ namespace dxvk {
      */
     template<typename Pred>
     void synchronizeUntil(const Pred& pred) {
+      if (m_recordOnly) {
+        this->completeRecordOnlySubmissions();
+
+        std::unique_lock<dxvk::mutex> lock(m_mutex);
+        if (!pred()) {
+          Logger::err("DxvkSubmissionQueue: record-only exact-context join left an unresolved wait");
+          m_lastError = VK_ERROR_DEVICE_LOST;
+        }
+        return;
+      }
+
       std::unique_lock<dxvk::mutex> lock(m_mutex);
       m_finishCond.wait(lock, pred);
     }
@@ -217,6 +228,7 @@ namespace dxvk {
     DxvkDevice*                 m_device;
     DxvkCheckpointBuffer*       m_checkpoints = nullptr;
     DxvkQueueCallback           m_callback;
+    bool                        m_recordOnly = false;
 
     DxvkTimelineSemaphores      m_semaphores;
     DxvkTimelineSemaphoreValues m_timelines;
@@ -248,6 +260,10 @@ namespace dxvk {
     void submitCmdLists();
 
     void finishCmdLists();
+
+    VkResult completeRecordOnlySubmissions();
+
+    VkResult completeRecordOnlySubmissionsLocked();
     
   };
   

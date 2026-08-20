@@ -18,6 +18,7 @@ namespace dxvk {
   #define EXTENSIONS_WITH_FEATURES                 \
     HANDLE_EXT(extAttachmentFeedbackLoopLayout);   \
     HANDLE_EXT(extBorderColorSwizzle);             \
+    HANDLE_EXT(extBufferDeviceAddress);            \
     HANDLE_EXT(extConservativeRasterization);      \
     HANDLE_EXT(extCustomBorderColor);              \
     HANDLE_EXT(extDepthClipEnable);                \
@@ -105,6 +106,8 @@ namespace dxvk {
           VkPhysicalDevice            adapter,
     const VkDeviceCreateInfo*         deviceInfo,
           bool                        safeMode) {
+    m_recordOnlyDirect = instance.isRecordOnlyDirect();
+
     // Can't query anything on a Vulkan 1.0 device
     auto vk = instance.vki();
     vk->vkGetPhysicalDeviceProperties(adapter, &m_properties.core.properties);
@@ -491,6 +494,23 @@ namespace dxvk {
   void DxvkDeviceCapabilities::disableUnusedFeatures(
     const DxvkInstance&               instance,
           bool                        safeMode) {
+    /* The unbound-buffer arm of vkGetBufferDeviceAddress is intentionally
+     * specified only by VK_EXT_buffer_device_address.  Record-only Helios
+     * therefore selects that arm (and its capture/replay bit) while generic
+     * DXVK keeps the promoted Vulkan 1.2 feature.  Enabling both is forbidden
+     * by VUID-VkDeviceCreateInfo-pNext-04748. */
+    if (m_recordOnlyDirect) {
+      m_featuresSupported.vk12.bufferDeviceAddress = VK_FALSE;
+      m_featuresSupported.vk12.bufferDeviceAddressCaptureReplay = VK_FALSE;
+      m_featuresSupported.vk12.bufferDeviceAddressMultiDevice = VK_FALSE;
+      m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressMultiDevice = VK_FALSE;
+    } else {
+      m_featuresSupported.vk12.bufferDeviceAddressCaptureReplay = VK_FALSE;
+      m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddress = VK_FALSE;
+      m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressCaptureReplay = VK_FALSE;
+      m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressMultiDevice = VK_FALSE;
+    }
+
     if (m_featuresSupported.extDescriptorHeap.descriptorHeap) {
       // Only enable descriptor heaps on drivers that are known to work and don't
       // have known performance regressions currently.
@@ -894,7 +914,8 @@ namespace dxvk {
       ENABLE_FEATURE(vk11, storageBuffer16BitAccess, true),
       ENABLE_FEATURE(vk11, storagePushConstant16, false),
 
-      ENABLE_FEATURE(vk12, bufferDeviceAddress, true),
+      ENABLE_FEATURE(vk12, bufferDeviceAddress, !m_recordOnlyDirect),
+      ENABLE_FEATURE(vk12, bufferDeviceAddressCaptureReplay, false),
       ENABLE_FEATURE(vk12, descriptorIndexing, true),
       ENABLE_FEATURE(vk12, storageBuffer8BitAccess, true),
       ENABLE_FEATURE(vk12, storagePushConstant8, false),
@@ -933,6 +954,10 @@ namespace dxvk {
       ENABLE_FEATURE(vk13, shaderZeroInitializeWorkgroupMemory, true),
       ENABLE_FEATURE(vk13, subgroupSizeControl, true),
       ENABLE_FEATURE(vk13, synchronization2, true),
+
+      /* Record-only allocation deferral needs the EXT-only unbound query arm. */
+      ENABLE_EXT_FEATURE(extBufferDeviceAddress, bufferDeviceAddress, m_recordOnlyDirect),
+      ENABLE_EXT_FEATURE(extBufferDeviceAddress, bufferDeviceAddressCaptureReplay, m_recordOnlyDirect),
 
       /* Allows sampling currently bound render targets for client APIs */
       ENABLE_EXT_FEATURE(extAttachmentFeedbackLoopLayout, attachmentFeedbackLoopLayout, false),

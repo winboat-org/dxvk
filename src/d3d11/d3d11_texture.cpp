@@ -121,6 +121,9 @@ namespace dxvk {
       imageInfo.sharing.handle             = INVALID_HANDLE_VALUE;
     }
 
+    if (pHeliosCreate && pHeliosCreate->ResourceAssociation)
+      imageInfo.heliosAssociation = *pHeliosCreate->ResourceAssociation;
+
     if (!pDevice->GetOptions()->disableMsaa)
       DecodeSampleCount(m_desc.SampleDesc.Count, &imageInfo.sampleCount);
 
@@ -1422,9 +1425,10 @@ namespace dxvk {
   D3D11Texture1D::D3D11Texture1D(
           D3D11Device*                pDevice,
     const D3D11_COMMON_TEXTURE_DESC*  pDesc,
-    const D3D11_ON_12_RESOURCE_INFO*  p11on12Info)
+    const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
+    const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate)
   : D3D11DeviceChild<ID3D11Texture1D>(pDevice),
-    m_texture (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, VK_NULL_HANDLE, nullptr),
+    m_texture (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, VK_NULL_HANDLE, nullptr, nullptr, pHeliosCreate),
     m_interop (this, &m_texture),
     m_surface (this),
     m_resource(this, pDevice),
@@ -1734,9 +1738,10 @@ namespace dxvk {
   D3D11Texture3D::D3D11Texture3D(
           D3D11Device*                pDevice,
     const D3D11_COMMON_TEXTURE_DESC*  pDesc,
-    const D3D11_ON_12_RESOURCE_INFO*  p11on12Info)
+    const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
+    const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate)
   : D3D11DeviceChild<ID3D11Texture3D1>(pDevice),
-    m_texture (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, VK_NULL_HANDLE, nullptr),
+    m_texture (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, VK_NULL_HANDLE, nullptr, nullptr, pHeliosCreate),
     m_interop (this, &m_texture),
     m_resource(this, pDevice),
     m_d3d10   (this),

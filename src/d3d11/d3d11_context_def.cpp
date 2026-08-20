@@ -369,17 +369,32 @@ namespace dxvk {
       return E_INVALIDARG;
     }
 
-    auto bufferSlice = pBuffer->AllocSlice(&m_allocationCache);
-    pMappedResource->pData        = bufferSlice->mapPtr();
+    const bool exactOuterAllocation =
+      pBuffer->GetBuffer()->info().heliosAssociation.outer_allocation_token != 0u;
+    if (exactOuterAllocation) {
+      auto bufferSlice = AllocStagingBuffer(pBuffer->Desc()->ByteWidth);
+      pMappedResource->pData = bufferSlice.mapPtr(0);
+      EmitCs([
+        cDstBuffer = pBuffer->GetBuffer(),
+        cSrcSlice  = std::move(bufferSlice)
+      ] (DxvkContext* ctx) {
+        ctx->copyBuffer(
+          cDstBuffer, 0u,
+          cSrcSlice.buffer(), cSrcSlice.offset(), cSrcSlice.length());
+      });
+    } else {
+      auto bufferSlice = pBuffer->AllocSlice(&m_allocationCache);
+      pMappedResource->pData = bufferSlice->mapPtr();
+      EmitCs([
+        cDstBuffer = pBuffer->GetBuffer(),
+        cDstSlice  = std::move(bufferSlice)
+      ] (DxvkContext* ctx) {
+        ctx->invalidateBuffer(cDstBuffer, Rc<DxvkResourceAllocation>(cDstSlice));
+      });
+    }
+
     pMappedResource->RowPitch     = pBuffer->Desc()->ByteWidth;
     pMappedResource->DepthPitch   = pBuffer->Desc()->ByteWidth;
-
-    EmitCs([
-      cDstBuffer = pBuffer->GetBuffer(),
-      cDstSlice  = std::move(bufferSlice)
-    ] (DxvkContext* ctx) {
-      ctx->invalidateBuffer(cDstBuffer, Rc<DxvkResourceAllocation>(cDstSlice));
-    });
 
     AddMapEntry(pBuffer->GetCookie(), *pMappedResource);
     return S_OK;
@@ -406,7 +421,8 @@ namespace dxvk {
     auto formatInfo = lookupFormatInfo(packedFormat);
     auto layout = pTexture->GetSubresourceLayout(formatInfo->aspectMask, Subresource);
 
-    if (pTexture->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_DIRECT) {
+    if (pTexture->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_DIRECT
+     && !pTexture->GetImage()->info().heliosAssociation.outer_allocation_token) {
       auto storage = pTexture->AllocStorage();
       auto mapPtr = storage->mapPtr();
 

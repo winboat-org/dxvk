@@ -91,6 +91,11 @@ namespace dxvk {
     VkResult vr = VK_SUCCESS;
 
     if (!this->isEmpty()) {
+      void* outerScope = device->beginHeliosOuterSubmit();
+      if (!outerScope) {
+        this->reset();
+        return VK_ERROR_DEVICE_LOST;
+      }
       if (helios_feed::enabled()) {
         const auto t0 = std::chrono::steady_clock::now();
         vr = vk->vkQueueSubmit2(queue, 1, &submitInfo, VK_NULL_HANDLE);
@@ -103,6 +108,7 @@ namespace dxvk {
       } else {
         vr = vk->vkQueueSubmit2(queue, 1, &submitInfo, VK_NULL_HANDLE);
       }
+      vr = device->finishHeliosOuterSubmit(outerScope, vr);
     }
 
     this->reset();
@@ -283,6 +289,12 @@ namespace dxvk {
     const auto& graphics = m_device->queues().graphics;
     const auto& transfer = m_device->queues().transfer;
     const auto& sparse = m_device->queues().sparse;
+    const bool recordOnly = m_device->instance()->isRecordOnlyDirect();
+
+    if (recordOnly && (m_wsiSemaphores.acquire || m_wsiSemaphores.present)) {
+      Logger::err("DxvkCommandList: record-only WSI semaphore use refused before the present-layer cutover");
+      return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
 
     m_commandSubmission.reset();
 
@@ -296,7 +308,12 @@ namespace dxvk {
         ? &m_cmdSparseBinds[cmd.sparseCmd]
         : nullptr;
 
-      if (isFirst) {
+      if (recordOnly && sparseBind) {
+        Logger::err("DxvkCommandList: record-only sparse submission refused");
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+      }
+
+      if (isFirst && !recordOnly) {
         // Wait for per-command list semaphores on first submission
         for (size_t i = 0; i < m_waitSemaphores.size(); i++) {
           m_commandSubmission.waitSemaphore(m_waitSemaphores[i].fence->handle(),
@@ -328,19 +345,23 @@ namespace dxvk {
       // If we had either a transfer command or a semaphore wait, submit to the
       // transfer queue so that all subsequent commands get stalled as necessary.
       if (m_device->hasDedicatedTransferQueue() && !m_commandSubmission.isEmpty()) {
-        m_commandSubmission.signalSemaphore(semaphores.transfer,
-          ++timelines.transfer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+        if (!recordOnly) {
+          m_commandSubmission.signalSemaphore(semaphores.transfer,
+            ++timelines.transfer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+        }
 
         if ((status = m_commandSubmission.submit(m_device, transfer.queueHandle, trackedId)))
           return status;
 
-        m_commandSubmission.waitSemaphore(semaphores.transfer,
-          timelines.transfer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
+        if (!recordOnly) {
+          m_commandSubmission.waitSemaphore(semaphores.transfer,
+            timelines.transfer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
+        }
       }
 
       // We promise to never do weird stuff to WSI images on
       // the transfer queue, so blocking graphics is sufficient
-      if (isFirst && m_wsiSemaphores.acquire) {
+      if (!recordOnly && isFirst && m_wsiSemaphores.acquire) {
         m_commandSubmission.waitSemaphore(m_wsiSemaphores.acquire,
           0, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
       }
@@ -355,7 +376,7 @@ namespace dxvk {
       if (cmd.execCommands)
         m_commandSubmission.executeCommandBuffer(cmd.cmdBuffers[uint32_t(DxvkCmdBuffer::ExecBuffer)]);
 
-      if (isLast) {
+      if (isLast && !recordOnly) {
         // Signal per-command list semaphores on the final submission
         for (size_t i = 0; i < m_signalSemaphores.size(); i++) {
           m_commandSubmission.signalSemaphore(m_signalSemaphores[i].fence->handle(),
@@ -369,8 +390,10 @@ namespace dxvk {
         }
       }
 
-      m_commandSubmission.signalSemaphore(semaphores.graphics,
-        ++timelines.graphics, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+      if (!recordOnly) {
+        m_commandSubmission.signalSemaphore(semaphores.graphics,
+          ++timelines.graphics, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+      }
 
       // Finally, submit all graphics commands of the current submission
       if ((status = m_commandSubmission.submit(m_device, graphics.queueHandle, trackedId)))
@@ -379,7 +402,7 @@ namespace dxvk {
       // If there are WSI semaphores involved, do another submit only
       // containing a timeline semaphore signal so that we can be sure
       // that they are safe to use afterwards.
-      if ((m_wsiSemaphores.present || m_wsiSemaphores.acquire) && isLast) {
+      if (!recordOnly && (m_wsiSemaphores.present || m_wsiSemaphores.acquire) && isLast) {
         m_commandSubmission.signalSemaphore(semaphores.graphics,
           ++timelines.graphics, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
 
@@ -389,7 +412,7 @@ namespace dxvk {
 
       // Finally, submit semaphore wait on the transfer queue. If this
       // is not the final iteration, fold the wait into the next one.
-      if (cmd.syncSdma) {
+      if (!recordOnly && cmd.syncSdma) {
         m_commandSubmission.waitSemaphore(semaphores.graphics,
           timelines.graphics, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
 

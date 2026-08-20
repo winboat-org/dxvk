@@ -469,6 +469,24 @@ namespace dxvk {
     VkDeviceSize bufferSize = pResource->Desc()->ByteWidth;
 
     if (likely(MapType == D3D11_MAP_WRITE_DISCARD)) {
+      auto buffer = pResource->GetBuffer();
+
+      // One outer WDDM allocation owns one immutable association and therefore
+      // one exact Mesa allocation. Reusing the current backing after the exact
+      // outer-context join preserves WRITE_DISCARD semantics without creating
+      // a second VkDeviceMemory carrying the same token.
+      if (unlikely(buffer->info().heliosAssociation.outer_allocation_token)) {
+        if (!WaitForResource(*buffer, pResource->GetSequenceNumber(), MapType, MapFlags)) {
+          pMappedResource->pData = nullptr;
+          return DXGI_ERROR_WAS_STILL_DRAWING;
+        }
+
+        pMappedResource->pData      = pResource->GetMapPtr();
+        pMappedResource->RowPitch   = bufferSize;
+        pMappedResource->DepthPitch = bufferSize;
+        return S_OK;
+      }
+
       // Allocate a new backing slice for the buffer and set
       // it as the 'new' mapped slice. This assumes that the
       // only way to invalidate a buffer is by mapping it.
@@ -514,7 +532,8 @@ namespace dxvk {
         bool hasWoAccess = buffer->isInUse(DxvkAccess::Write);
         bool hasRwAccess = buffer->isInUse(DxvkAccess::Read);
 
-        if (hasRwAccess && !hasWoAccess) {
+        if (hasRwAccess && !hasWoAccess
+         && !buffer->info().heliosAssociation.outer_allocation_token) {
           // Uncached reads can be so slow that a GPU sync may actually be faster
           doInvalidatePreserve = buffer->memFlags() & VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
         }
@@ -622,7 +641,8 @@ namespace dxvk {
     if (mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_DIRECT) {
       Rc<DxvkImage> mappedImage = pResource->GetImage();
 
-      if (MapType == D3D11_MAP_WRITE_DISCARD) {
+      if (MapType == D3D11_MAP_WRITE_DISCARD
+       && !mappedImage->info().heliosAssociation.outer_allocation_token) {
         EmitCs([
           cImage = std::move(mappedImage),
           cStorage = pResource->DiscardStorage()
@@ -869,6 +889,14 @@ namespace dxvk {
           UINT                          Length,
     const void*                         pSrcData,
           UINT                          CopyFlags) {
+    if (unlikely(pDstBuffer->GetBuffer()->info().heliosAssociation.outer_allocation_token)) {
+      // The exact associated backing may not be renamed. Record the update as
+      // ordinary transfer work so it is sealed into the next outer batch.
+      D3D11CommonContext<D3D11ImmediateContext>::UpdateBuffer(
+        pDstBuffer, Offset, Length, pSrcData);
+      return;
+    }
+
     void* mapPtr = nullptr;
 
     if (likely(CopyFlags != D3D11_COPY_NO_OVERWRITE)) {

@@ -111,6 +111,9 @@ namespace dxvk {
     // canonical layout at creation so both Vulkan instances use one exact
     // external-memory layout contract.
     bool KmdTransferSource = false;
+    // Package-owned immutable association for the exact outer WDDM
+    // allocation. The record is copied into the DxvkImage object.
+    const HeliosResourceAssociationV1* ResourceAssociation = nullptr;
   };
 
 
@@ -798,7 +801,8 @@ namespace dxvk {
     D3D11Texture1D(
             D3D11Device*                pDevice,
       const D3D11_COMMON_TEXTURE_DESC*  pDesc,
-      const D3D11_ON_12_RESOURCE_INFO*  p11on12Info);
+      const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
+      const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate = nullptr);
     
     ~D3D11Texture1D();
     
@@ -921,7 +925,8 @@ namespace dxvk {
     D3D11Texture3D(
             D3D11Device*                pDevice,
       const D3D11_COMMON_TEXTURE_DESC*  pDesc,
-      const D3D11_ON_12_RESOURCE_INFO*  p11on12Info);
+      const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
+      const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate = nullptr);
     
     ~D3D11Texture3D();
     

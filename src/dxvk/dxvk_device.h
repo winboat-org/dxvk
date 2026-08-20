@@ -28,6 +28,40 @@
 #include "dxvk_unbound.h"
 
 namespace dxvk {
+
+  using DxvkHeliosOuterBeginProc = void* (*)(void* context);
+  using DxvkHeliosOuterFinishProc = VkResult (*)(
+    void* context, void* scope, VkResult lowerResult);
+  using DxvkHeliosOuterJoinProc = VkResult (*)(void* context);
+  using DxvkHeliosOuterAllocateProc = VkResult (*)(
+    void* context, uint64_t bytes, uint32_t cpuVisible,
+    uint32_t deviceLocal, HeliosResourceAssociationV1* associationOut);
+  using DxvkHeliosOuterTeardownBeginProc = void* (*)(
+    void* context, uint64_t deviceGeneration,
+    uint64_t outerAllocationToken);
+  using DxvkHeliosOuterRetireProc = VkResult (*)(
+    void* context, uint64_t deviceGeneration,
+    uint64_t outerAllocationToken, VkResult teardownResult);
+
+  /**
+   * Immutable package-owned edge from the outer UMD into one record-only
+   * device. This is copied before any allocator or queue object is built, so
+   * neither submission nor teardown can observe a partially published table.
+   */
+  struct DxvkHeliosOuterOps {
+    void*                       context = nullptr;
+    DxvkHeliosOuterBeginProc     begin = nullptr;
+    DxvkHeliosOuterFinishProc    finish = nullptr;
+    DxvkHeliosOuterJoinProc      join = nullptr;
+    DxvkHeliosOuterAllocateProc  allocate = nullptr;
+    DxvkHeliosOuterTeardownBeginProc teardownBegin = nullptr;
+    DxvkHeliosOuterRetireProc    retire = nullptr;
+
+    explicit operator bool() const {
+      return context && begin && finish && join && allocate
+          && teardownBegin && retire;
+    }
+  };
   
   class DxvkInstance;
   class DxvkShaderCache;
@@ -92,7 +126,8 @@ namespace dxvk {
       const Rc<vk::DeviceFn>&         vkd,
       const DxvkDeviceCapabilities&   caps,
       const DxvkDeviceQueueSet&       queues,
-      const DxvkQueueCallback&        queueCallback);
+      const DxvkQueueCallback&        queueCallback,
+      const DxvkHeliosOuterOps&       heliosOuterOps = { });
       
     ~DxvkDevice();
     
@@ -205,6 +240,33 @@ namespace dxvk {
     Rc<DxvkInstance> instance() const {
       return m_instance;
     }
+
+    void* beginHeliosOuterSubmit() const;
+
+    VkResult finishHeliosOuterSubmit(
+            void*       scope,
+            VkResult    lowerResult) const;
+
+    VkResult joinHeliosOuterSubmit() const;
+
+    VkResult createHeliosOuterAllocation(
+            VkDeviceSize                 bytes,
+            VkMemoryPropertyFlags       memoryProperties,
+            HeliosResourceAssociationV1* association) const;
+
+    bool validateHeliosOuterAssociation(
+      const HeliosResourceAssociationV1& association,
+            VkDeviceSize                 bytes,
+            VkMemoryPropertyFlags        memoryProperties) const;
+
+    void* beginHeliosOuterAllocationTeardown(
+            uint64_t     deviceGeneration,
+            uint64_t     outerAllocationToken) const;
+
+    VkResult retireHeliosOuterAllocation(
+            uint64_t     deviceGeneration,
+            uint64_t     outerAllocationToken,
+            VkResult     teardownResult) const;
 
     /**
      * \brief The adapter
@@ -787,6 +849,10 @@ namespace dxvk {
 
     DxvkDeviceFeatures          m_features;
     DxvkDeviceInfo              m_properties;
+
+    // Declared before m_objects and m_submissionQueue intentionally: both may
+    // need the immutable outer construction edge in their constructors.
+    DxvkHeliosOuterOps          m_heliosOuterOps;
 
     DxvkShaderOptions           m_shaderOptions;
 

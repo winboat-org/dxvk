@@ -27,7 +27,9 @@ namespace dxvk {
     Logger::info(str::format("DXVK: ", DXVK_VERSION));
     Logger::info(str::format("Build: ", DXVK_TARGET, " ", DXVK_COMPILER, " ", DXVK_COMPILER_VERSION));
 
-    wsi::init();
+    m_recordOnlyDirect = args.recordOnlyDirect;
+    if (!m_recordOnlyDirect)
+      wsi::init();
 
     m_config = Config::getUserConfig();
     m_config.merge(Config::getAppConfig(env::getExePath()));
@@ -37,13 +39,17 @@ namespace dxvk {
 
     // Load Vulkan library
     if (!initVulkanLoader(args))
-      throw DxvkError("Failed to load vulkan-1 library.");
+      throw DxvkError("Failed to initialize Vulkan procedure source.");
 
-    // Initialize extension providers
-    m_extProviders.push_back(&DxvkPlatformExts::s_instance);
+    // A record-only translator has no WSI and no loader-owned extension
+    // providers. Generic DXVK and D3D11-on-12 imports retain their old list.
+    if (!args.recordOnlyDirect)
+      m_extProviders.push_back(&DxvkPlatformExts::s_instance);
 #ifdef _WIN32
-    m_extProviders.push_back(&VrInstance::s_instance);
-    m_extProviders.push_back(&DxvkXrProvider::s_instance);
+    if (!args.recordOnlyDirect) {
+      m_extProviders.push_back(&VrInstance::s_instance);
+      m_extProviders.push_back(&DxvkXrProvider::s_instance);
+    }
 #endif
 
     Logger::info("Extension providers:");
@@ -65,7 +71,8 @@ namespace dxvk {
     if (m_messenger)
       m_vki->vkDestroyDebugUtilsMessengerEXT(m_vki->instance(), m_messenger, nullptr);
 
-    wsi::quit();
+    if (!m_recordOnlyDirect)
+      wsi::quit();
   }
   
   
@@ -103,7 +110,9 @@ namespace dxvk {
   
   bool DxvkInstance::initVulkanLoader(const DxvkInstanceImportInfo& args) {
     m_vkl = args.loaderProc
-      ? new vk::LibraryFn(args.loaderProc)
+      ? new vk::LibraryFn(args.loaderProc,
+          args.recordOnlyDirect ? args.instance : VK_NULL_HANDLE,
+          args.expectedModule)
       : new vk::LibraryFn();
 
     return m_vkl->getLoaderProc() != nullptr;
@@ -115,24 +124,29 @@ namespace dxvk {
     std::set<std::string> layersSupported;
     std::set<std::string> layersEnabled;
 
-    uint32_t layerCount = 0u;
-    m_vkl->vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+    if (!args.recordOnlyDirect) {
+      uint32_t layerCount = 0u;
+      m_vkl->vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
 
-    std::vector<VkLayerProperties> layers(layerCount);
-    m_vkl->vkEnumerateInstanceLayerProperties(&layerCount, layers.data());
+      std::vector<VkLayerProperties> layers(layerCount);
+      m_vkl->vkEnumerateInstanceLayerProperties(&layerCount, layers.data());
 
-    for (const auto& layer : layers)
-      layersSupported.insert(layer.layerName);
+      for (const auto& layer : layers)
+        layersSupported.insert(layer.layerName);
+    }
 
     // Query supported instance extensions
     std::set<VkExtensionProperties, vk::SortExtension> extensionsSupported;
     std::set<VkExtensionProperties, vk::SortExtension> extensionsEnabled;
 
-    uint32_t extensionNameCount = 0u;
-    m_vkl->vkEnumerateInstanceExtensionProperties(nullptr, &extensionNameCount, nullptr);
+    std::vector<VkExtensionProperties> extensionNamesSupported;
+    if (!args.recordOnlyDirect) {
+      uint32_t extensionNameCount = 0u;
+      m_vkl->vkEnumerateInstanceExtensionProperties(nullptr, &extensionNameCount, nullptr);
 
-    std::vector<VkExtensionProperties> extensionNamesSupported(extensionNameCount);
-    m_vkl->vkEnumerateInstanceExtensionProperties(nullptr, &extensionNameCount, extensionNamesSupported.data());
+      extensionNamesSupported.resize(extensionNameCount);
+      m_vkl->vkEnumerateInstanceExtensionProperties(nullptr, &extensionNameCount, extensionNamesSupported.data());
+    }
 
     // When importing an instance, filter by enabled instance extensions
     if (args.instance) {
@@ -171,7 +185,9 @@ namespace dxvk {
       env::getEnvVar("ENABLE_VULKAN_RENDERDOC_CAPTURE") == "1" ||
       env::getEnvVar("MESA_VK_TRACE") != "");
 
-    if (debugEnv == "validation")
+    if (args.recordOnlyDirect)
+      m_debugFlags = 0u;
+    else if (debugEnv == "validation")
       m_debugFlags.set(DxvkDebugFlag::Validation);
     else if (debugEnv == "markers")
       m_debugFlags.set(DxvkDebugFlag::Capture, DxvkDebugFlag::Markers);

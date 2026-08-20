@@ -8,7 +8,8 @@ namespace dxvk {
   D3D11Buffer::D3D11Buffer(
           D3D11Device*                pDevice,
     const D3D11_BUFFER_DESC*          pDesc,
-    const D3D11_ON_12_RESOURCE_INFO*  p11on12Info)
+    const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
+    const HeliosResourceAssociationV1* pHeliosAssociation)
   : D3D11DeviceChild<ID3D11Buffer>(pDevice),
     m_desc        (*pDesc),
     m_resource    (this, pDevice),
@@ -23,6 +24,9 @@ namespace dxvk {
     info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
     info.access = VK_ACCESS_TRANSFER_READ_BIT
                 | VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    if (pHeliosAssociation)
+      info.heliosAssociation = *pHeliosAssociation;
     
     if (pDesc->BindFlags & D3D11_BIND_VERTEX_BUFFER) {
       info.usage  |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;

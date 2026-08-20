@@ -103,6 +103,11 @@ namespace dxvk {
 
     // Debug name
     const char* debugName = nullptr;
+
+    // Immutable outer-WDDM allocation association. A zero token means that
+    // this is an ordinary non-Helios image. The allocation path inserts a
+    // local immutable copy into the exact VkMemoryAllocateInfo pNext chain.
+    HeliosResourceAssociationV1 heliosAssociation = { };
   };
   
   

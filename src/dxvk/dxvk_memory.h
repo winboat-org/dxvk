@@ -4,6 +4,8 @@
 #include <map>
 #include <memory>
 
+#include <helios_resource_association.h>
+
 #include "dxvk_access.h"
 #include "dxvk_adapter.h"
 #include "dxvk_allocator.h"
@@ -79,6 +81,7 @@ namespace dxvk {
     void*                 mapPtr  = nullptr;
     VkDeviceAddress       gpuVa   = 0u;
     uint64_t              cookie  = 0u;
+    HeliosResourceAssociationV1 heliosAssociation = { };
   };
 
 
@@ -726,6 +729,7 @@ namespace dxvk {
     D3DKMT_HANDLE               m_kmtGlobal = 0;
     bool                        m_ownsKmtHandles = false;
     std::atomic<uint64_t>       m_heliosPresentSlot = { 0u };
+    HeliosResourceAssociationV1 m_heliosAssociation = { };
 
     DxvkSparsePageTable*        m_sparsePageTable = nullptr;
 
@@ -1086,6 +1090,9 @@ namespace dxvk {
     VkExternalMemoryHandleTypeFlagBits handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_FLAG_BITS_MAX_ENUM;
     /// Force a dedicated VkDeviceMemory allocation even without Vulkan external-memory pNexts.
     bool forceDedicated = false;
+    /// Exact package-owned association record for an outer WDDM allocation.
+    /// Borrowed only for the synchronous vkAllocateMemory call.
+    const HeliosResourceAssociationV1* heliosAssociation = nullptr;
     /// Helios import identity: when nonzero, the dedicated allocation uses
     /// EXACTLY this allocationSize instead of the image's own memory
     /// requirements (the creator's recorded venus allocation size — required
@@ -1508,7 +1515,8 @@ namespace dxvk {
     DxvkDeviceMemory allocateDeviceMemory(
             DxvkMemoryType&       type,
             VkDeviceSize          size,
-      const void*                 next);
+      const void*                 next,
+      const HeliosResourceAssociationV1* heliosAssociation = nullptr);
 
     void assignMemoryDebugName(
       const DxvkDeviceMemory&     memory,

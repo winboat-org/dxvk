@@ -276,6 +276,17 @@ namespace dxvk {
 
 
   DxvkResourceAllocation::~DxvkResourceAllocation() {
+    const bool heliosAssociated =
+      m_heliosAssociation.outer_allocation_token != 0u;
+    void* heliosOuterScope = heliosAssociated
+      ? m_allocator->device()->beginHeliosOuterAllocationTeardown(
+          m_heliosAssociation.device_generation,
+          m_heliosAssociation.outer_allocation_token)
+      : nullptr;
+    VkResult heliosTeardownResult = heliosAssociated && !heliosOuterScope
+      ? VK_ERROR_DEVICE_LOST
+      : VK_SUCCESS;
+
     // The producer marks this exact allocation only after successful slot
     // publication. Taking that immutable identity here follows backing
     // rotation without resolving the Venus memory export for every unrelated
@@ -319,6 +330,20 @@ namespace dxvk {
 
       if (unlikely(m_sparsePageTable))
         delete m_sparsePageTable;
+    }
+
+    if (heliosAssociated) {
+      if (heliosOuterScope) {
+        heliosTeardownResult = m_allocator->device()->finishHeliosOuterSubmit(
+          heliosOuterScope, heliosTeardownResult);
+      }
+      const VkResult retireResult =
+        m_allocator->device()->retireHeliosOuterAllocation(
+          m_heliosAssociation.device_generation,
+          m_heliosAssociation.outer_allocation_token,
+          heliosTeardownResult);
+      if (unlikely(retireResult != VK_SUCCESS))
+        Logger::err("DxvkResourceAllocation: exact Helios teardown refused");
     }
 
   }
@@ -949,7 +974,8 @@ namespace dxvk {
 
     for (auto typeIndex : bit::BitMask(requirements.memoryTypeBits & getMemoryTypeMask(allocationInfo.properties))) {
       auto& type = m_memTypes[typeIndex];
-      memory = allocateDeviceMemory(type, requirements.size, next);
+      memory = allocateDeviceMemory(type, requirements.size, next,
+        allocationInfo.heliosAssociation);
 
       if (likely(memory.memory != VK_NULL_HANDLE)) {
         mapDeviceMemory(memory, allocationInfo.properties);
@@ -980,13 +1006,13 @@ namespace dxvk {
         memoryRequirements.memoryTypeBits &= ~getMemoryTypeMask(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
       if (likely(memoryRequirements.memoryTypeBits)) {
-        bool allowSuballocation = true;
+        bool allowSuballocation = !allocationInfo.heliosAssociation;
 
         // If the given allocation cache supports the memory types and usage
         // flags that we need, try to use it to service this allocation.
         // Only use the allocation cache for mappable allocations since those
         // are expected to happen frequently.
-        if (allocationCache && createInfo.size <= DxvkLocalAllocationCache::MaxSize
+        if (allowSuballocation && allocationCache && createInfo.size <= DxvkLocalAllocationCache::MaxSize
          && allocationCache->m_memoryTypes && !(allocationCache->m_memoryTypes & ~memoryRequirements.memoryTypeBits)
          && (allocationInfo.properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
           allocation = allocationCache->allocateFromCache(createInfo.size);
@@ -1068,25 +1094,43 @@ namespace dxvk {
       if (unlikely(allocationInfo.mode.test(DxvkAllocationMode::NoDeviceMemory)))
         requirements.memoryRequirements.memoryTypeBits &= ~getMemoryTypeMask(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-      // When allocating memory for a descriptor heap, use a dedicated allocation. We
-      // ca expect these to be long-lived and mapped, and potentially use a dedicated
-      // memory type that may have unexpected size restrictions. Also make sure not
-      // to ever relocate these buffers since they require a stable GPU address.
-      if (createInfo.usage & (DescriptorBufferUsage | DescriptorHeapUsage)) {
-        VkMemoryDedicatedAllocateInfo dedicatedInfo = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+      // Descriptor heaps and Helios-associated outer allocations require one
+      // exact dedicated VkDeviceMemory. The association sits in the allocation
+      // chain, never in VkBufferCreateInfo and never in a side registry.
+      if (allocationInfo.heliosAssociation
+       || (createInfo.usage & (DescriptorBufferUsage | DescriptorHeapUsage))) {
+        VkMemoryDedicatedAllocateInfo dedicatedInfo = {
+          VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+          allocationInfo.heliosAssociation };
         dedicatedInfo.buffer = buffer;
 
         if ((allocation = allocateDedicatedMemory(requirements.memoryRequirements, allocationInfo, &dedicatedInfo)))
           allocation->m_flags.clr(DxvkAllocationFlag::CanMove);
+
+        if (!allocation && (allocationInfo.properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+         && !allocationInfo.mode.test(DxvkAllocationMode::NoFallback)) {
+          DxvkAllocationInfo fallbackInfo = allocationInfo;
+          fallbackInfo.properties &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+          if ((allocation = allocateDedicatedMemory(requirements.memoryRequirements, fallbackInfo, &dedicatedInfo)))
+            allocation->m_flags.clr(DxvkAllocationFlag::CanMove);
+        }
       }
 
       // If we have an existing global allocation from earlier, make sure it is suitable
-      if (!allocation || !(requirements.memoryRequirements.memoryTypeBits & (1u << allocation->m_type->index))
-       || (allocation->m_size < requirements.memoryRequirements.size)
-       || (allocation->m_address & requirements.memoryRequirements.alignment))
+      if (!allocation && !allocationInfo.heliosAssociation)
         allocation = allocateMemory(requirements.memoryRequirements, allocationInfo);
+      else if (allocation && (!(requirements.memoryRequirements.memoryTypeBits & (1u << allocation->m_type->index))
+       || (allocation->m_size < requirements.memoryRequirements.size)
+       || (allocation->m_address & requirements.memoryRequirements.alignment))) {
+        if (allocationInfo.heliosAssociation)
+          allocation = nullptr;
+        else
+          allocation = allocateMemory(requirements.memoryRequirements, allocationInfo);
+      }
 
-      if (!allocation && (allocationInfo.properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+      if (!allocation && !allocationInfo.heliosAssociation
+       && (allocationInfo.properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
        && !allocationInfo.mode.test(DxvkAllocationMode::NoFallback)) {
         DxvkAllocationInfo fallbackInfo = allocationInfo;
         fallbackInfo.properties &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1602,21 +1646,55 @@ namespace dxvk {
   DxvkDeviceMemory DxvkMemoryAllocator::allocateDeviceMemory(
           DxvkMemoryType&       type,
           VkDeviceSize          size,
-    const void*                 next) {
+    const void*                 next,
+    const HeliosResourceAssociationV1* heliosAssociation) {
     auto vk = m_device->vkd();
+    const bool hasCallerNext = next != nullptr;
+    const bool useGlobalBuffer = type.bufferUsage && !hasCallerNext;
 
     // If global buffers are enabled for this allocation, pad the allocation size
     // to a multiple of the global buffer alignment. This can happen when we create
     // a dedicated allocation for a large resource.
-    if (type.bufferUsage && !next)
+    if (useGlobalBuffer)
       size = align(size, GlobalBufferAlignment);
 
     // Preemptively free some unused allocations to reduce memory waste
     freeEmptyChunksInHeap(*type.heap, size, high_resolution_clock::now());
 
     // If we're exceeding vram budget on a dedicated GPU, fall back to system memory.
-    if (!next && type.heap->enforceBudget && (getMemoryStats(type.heap->index).memoryAllocated + size > type.heap->memoryBudget)) {
+    if (!hasCallerNext && type.heap->enforceBudget && (getMemoryStats(type.heap->index).memoryAllocated + size > type.heap->memoryBudget)) {
       type.heap->enableEviction = true;
+      return DxvkDeviceMemory();
+    }
+
+    HeliosResourceAssociationV1 internalAssociation = { };
+    const HeliosResourceAssociationV1* exactAssociation = heliosAssociation;
+    bool internalOuterAllocation = false;
+    if (m_device->instance()->isRecordOnlyDirect() && !exactAssociation) {
+      VkResult associationResult = m_device->createHeliosOuterAllocation(
+        size, type.properties.propertyFlags, &internalAssociation);
+      if (associationResult != VK_SUCCESS)
+        return DxvkDeviceMemory();
+      internalAssociation.p_next = next;
+      next = &internalAssociation;
+      exactAssociation = &internalAssociation;
+      internalOuterAllocation = true;
+    }
+
+    if (exactAssociation && !m_device->validateHeliosOuterAssociation(
+          *exactAssociation, size, type.properties.propertyFlags)) {
+      if (internalOuterAllocation) {
+        void* scope = m_device->beginHeliosOuterAllocationTeardown(
+          exactAssociation->device_generation,
+          exactAssociation->outer_allocation_token);
+        VkResult teardownResult = scope
+          ? m_device->finishHeliosOuterSubmit(scope, VK_SUCCESS)
+          : VK_ERROR_DEVICE_LOST;
+        m_device->retireHeliosOuterAllocation(
+          exactAssociation->device_generation,
+          exactAssociation->outer_allocation_token,
+          teardownResult);
+      }
       return DxvkDeviceMemory();
     }
 
@@ -1628,7 +1706,7 @@ namespace dxvk {
     VkMemoryPriorityAllocateInfoEXT priorityInfo = { VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT };
 
     if (type.properties.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
-      if (next) {
+      if (hasCallerNext) {
         // Dedicated allocation, may or may not be a shared resource. Assign this the
         // highest priority since this is expected to be a high-bandwidth resource,
         // such as a render target or a descriptor heap. The latter may be host-visible.
@@ -1662,8 +1740,26 @@ namespace dxvk {
     if (vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory)) {
       freeEmptyChunksInHeap(*type.heap, VkDeviceSize(-1), high_resolution_clock::time_point());
 
-      if (vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory))
+      if (vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory)) {
+        if (internalOuterAllocation) {
+          void* scope = m_device->beginHeliosOuterAllocationTeardown(
+            exactAssociation->device_generation,
+            exactAssociation->outer_allocation_token);
+          VkResult teardownResult = scope
+            ? m_device->finishHeliosOuterSubmit(scope, VK_SUCCESS)
+            : VK_ERROR_DEVICE_LOST;
+          m_device->retireHeliosOuterAllocation(
+            exactAssociation->device_generation,
+            exactAssociation->outer_allocation_token,
+            teardownResult);
+        }
         return DxvkDeviceMemory();
+      }
+    }
+
+    if (exactAssociation) {
+      result.heliosAssociation = *exactAssociation;
+      result.heliosAssociation.p_next = nullptr;
     }
 
     // Technically redundant if EXT_memory_priority is also supported, but this shouldn't hurt
@@ -1671,7 +1767,7 @@ namespace dxvk {
       vk->vkSetDeviceMemoryPriorityEXT(vk->device(), result.memory, priorityInfo.priority);
 
     // Create global buffer if the allocation supports it
-    if (type.bufferUsage && !next) {
+    if (useGlobalBuffer) {
       VkBuffer buffer = VK_NULL_HANDLE;
 
       VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
@@ -1882,6 +1978,14 @@ namespace dxvk {
 
     allocation->m_buffer = memory.buffer;
     allocation->m_bufferAddress = memory.gpuVa;
+    const HeliosResourceAssociationV1* association =
+      memory.heliosAssociation.outer_allocation_token
+        ? &memory.heliosAssociation
+        : allocationInfo.heliosAssociation;
+    if (association) {
+      allocation->m_heliosAssociation = *association;
+      allocation->m_heliosAssociation.p_next = nullptr;
+    }
     return allocation;
   }
 
@@ -1890,8 +1994,29 @@ namespace dxvk {
           DxvkMemoryType&       type,
           DxvkDeviceMemory      memory) {
     auto vk = m_device->vkd();
+    const bool heliosAssociated =
+      memory.heliosAssociation.outer_allocation_token != 0u;
+    void* heliosOuterScope = heliosAssociated
+      ? m_device->beginHeliosOuterAllocationTeardown(
+          memory.heliosAssociation.device_generation,
+          memory.heliosAssociation.outer_allocation_token)
+      : nullptr;
+    VkResult heliosTeardownResult = heliosAssociated && !heliosOuterScope
+      ? VK_ERROR_DEVICE_LOST
+      : VK_SUCCESS;
     vk->vkDestroyBuffer(vk->device(), memory.buffer, nullptr);
     vk->vkFreeMemory(vk->device(), memory.memory, nullptr);
+
+    if (heliosAssociated) {
+      if (heliosOuterScope) {
+        heliosTeardownResult = m_device->finishHeliosOuterSubmit(
+          heliosOuterScope, heliosTeardownResult);
+      }
+      m_device->retireHeliosOuterAllocation(
+        memory.heliosAssociation.device_generation,
+        memory.heliosAssociation.outer_allocation_token,
+        heliosTeardownResult);
+    }
 
     type.stats.memoryAllocated -= memory.size;
   }

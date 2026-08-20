@@ -3,6 +3,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <helios_resource_association.h>
+
 #include "dxvk_descriptor_pool.h"
 #include "dxvk_format.h"
 #include "dxvk_hash.h"
@@ -38,6 +40,11 @@ namespace dxvk {
 
     /// Debug name.
     const char* debugName = nullptr;
+
+    /// Immutable outer-WDDM allocation association. A zero token means that
+    /// this is an ordinary non-Helios buffer. Associated buffers copy this
+    /// record into every exact VkMemoryAllocateInfo used by their storage.
+    HeliosResourceAssociationV1 heliosAssociation = { };
   };
 
 
@@ -296,6 +303,15 @@ namespace dxvk {
       DxvkAllocationInfo allocationInfo = { };
       allocationInfo.resourceCookie = cookie();
       allocationInfo.properties = m_properties;
+
+      HeliosResourceAssociationV1 association = m_info.heliosAssociation;
+      if (association.outer_allocation_token) {
+        // The UMD supplies a root record. Each backing allocation receives its
+        // own immutable copy so buffer renaming cannot retain a caller pointer.
+        association.p_next = nullptr;
+        allocationInfo.forceDedicated = true;
+        allocationInfo.heliosAssociation = &association;
+      }
 
       VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
       info.flags = m_info.flags;

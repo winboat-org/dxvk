@@ -40,6 +40,27 @@ if get_option('build_id')
 endif
 
 dxvk_include_dirs = ['./include']
+
+# The Helios fork consumes the package-owned allocation-association declaration
+# directly.  Keep one generated C mirror in the root protocol repository rather
+# than copying the ABI into this nested repository.  The explicit option serves
+# standalone/mirrored builds; the two defaults match the source-tree checkout
+# and the Windows build host respectively.
+helios_protocol_include = get_option('helios_protocol_include')
+if helios_protocol_include == ''
+  if fs.is_dir('../protocol/include')
+    helios_protocol_include = '../protocol/include'
+  elif fs.is_dir('Z:/protocol/include')
+    helios_protocol_include = 'Z:/protocol/include'
+  else
+    error('Helios protocol include directory not found; set -Dhelios_protocol_include=...')
+  endif
+endif
+if not fs.is_dir(helios_protocol_include)
+  error('Invalid Helios protocol include directory: ' + helios_protocol_include)
+endif
+dxvk_include_dirs += [helios_protocol_include]
+
 if fs.is_dir('./include/vulkan/include')
   dxvk_include_dirs += ['./include/vulkan/include']
 elif not cpp.check_header('vulkan/vulkan.h')

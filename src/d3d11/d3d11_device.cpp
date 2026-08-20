@@ -127,6 +127,26 @@ namespace dxvk {
     const D3D11_BUFFER_DESC*      pDesc,
     const D3D11_SUBRESOURCE_DATA* pInitialData,
           ID3D11Buffer**          ppBuffer) {
+    return CreateBufferBase(pDesc, pInitialData, nullptr, ppBuffer);
+  }
+
+
+  HRESULT D3D11Device::CreateBufferHelios(
+    const D3D11_BUFFER_DESC*      pDesc,
+    const D3D11_SUBRESOURCE_DATA* pInitialData,
+    const HeliosResourceAssociationV1* pAssociation,
+          ID3D11Buffer**          ppBuffer) {
+    if (!pAssociation || !pAssociation->outer_allocation_token)
+      return E_INVALIDARG;
+    return CreateBufferBase(pDesc, pInitialData, pAssociation, ppBuffer);
+  }
+
+
+  HRESULT D3D11Device::CreateBufferBase(
+    const D3D11_BUFFER_DESC*      pDesc,
+    const D3D11_SUBRESOURCE_DATA* pInitialData,
+    const HeliosResourceAssociationV1* pAssociation,
+          ID3D11Buffer**          ppBuffer) {
     InitReturnPtr(ppBuffer);
     
     if (!pDesc)
@@ -146,7 +166,7 @@ namespace dxvk {
       return S_FALSE;
     
     try {
-      const Com<D3D11Buffer> buffer = new D3D11Buffer(this, &desc, nullptr);
+      const Com<D3D11Buffer> buffer = new D3D11Buffer(this, &desc, nullptr, pAssociation);
 
       if (!(desc.MiscFlags & D3D11_RESOURCE_MISC_TILE_POOL))
         m_initializer->InitBuffer(buffer.ptr(), pInitialData);
@@ -163,6 +183,26 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture1D(
     const D3D11_TEXTURE1D_DESC*   pDesc,
     const D3D11_SUBRESOURCE_DATA* pInitialData,
+          ID3D11Texture1D**       ppTexture1D) {
+    return CreateTexture1DBase(pDesc, pInitialData, nullptr, ppTexture1D);
+  }
+
+
+  HRESULT D3D11Device::CreateTexture1DHelios(
+    const D3D11_TEXTURE1D_DESC*   pDesc,
+    const D3D11_SUBRESOURCE_DATA* pInitialData,
+    const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
+          ID3D11Texture1D**       ppTexture1D) {
+    if (!pHeliosCreate || !pHeliosCreate->ResourceAssociation)
+      return E_INVALIDARG;
+    return CreateTexture1DBase(pDesc, pInitialData, pHeliosCreate, ppTexture1D);
+  }
+
+
+  HRESULT D3D11Device::CreateTexture1DBase(
+    const D3D11_TEXTURE1D_DESC*   pDesc,
+    const D3D11_SUBRESOURCE_DATA* pInitialData,
+    const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
           ID3D11Texture1D**       ppTexture1D) {
     InitReturnPtr(ppTexture1D);
 
@@ -195,7 +235,7 @@ namespace dxvk {
       return S_FALSE;
     
     try {
-      const Com<D3D11Texture1D> texture = new D3D11Texture1D(this, &desc, nullptr);
+      const Com<D3D11Texture1D> texture = new D3D11Texture1D(this, &desc, nullptr, pHeliosCreate);
       m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
       *ppTexture1D = texture.ref();
       return S_OK;
@@ -237,6 +277,37 @@ namespace dxvk {
     *ppTexture2D = texture2D;
     return S_OK;
   }
+
+
+  HRESULT D3D11Device::CreateTexture2DHelios(
+    const D3D11_TEXTURE2D_DESC*   pDesc,
+    const D3D11_SUBRESOURCE_DATA* pInitialData,
+    const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
+          ID3D11Texture2D**       ppTexture2D) {
+    InitReturnPtr(ppTexture2D);
+    if (!pDesc || !pHeliosCreate || !pHeliosCreate->ResourceAssociation)
+      return E_INVALIDARG;
+
+    D3D11_TEXTURE2D_DESC1 desc = { };
+    desc.Width = pDesc->Width;
+    desc.Height = pDesc->Height;
+    desc.MipLevels = pDesc->MipLevels;
+    desc.ArraySize = pDesc->ArraySize;
+    desc.Format = pDesc->Format;
+    desc.SampleDesc = pDesc->SampleDesc;
+    desc.Usage = pDesc->Usage;
+    desc.BindFlags = pDesc->BindFlags;
+    desc.CPUAccessFlags = pDesc->CPUAccessFlags;
+    desc.MiscFlags = pDesc->MiscFlags;
+    desc.TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
+
+    ID3D11Texture2D1* texture = nullptr;
+    HRESULT hr = CreateTexture2DBase(&desc, pInitialData,
+      ppTexture2D ? &texture : nullptr, pHeliosCreate);
+    if (hr == S_OK)
+      *ppTexture2D = texture;
+    return hr;
+  }
   
   
   HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture2D1(
@@ -255,7 +326,8 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture2DBase(
     const D3D11_TEXTURE2D_DESC1*  pDesc,
     const D3D11_SUBRESOURCE_DATA* pInitialData,
-          ID3D11Texture2D1**      ppTexture2D) {
+          ID3D11Texture2D1**      ppTexture2D,
+    const D3D11_HELIOS_CREATE_INFO* pHeliosCreate) {
     D3D11_COMMON_TEXTURE_DESC desc;
     desc.Width          = pDesc->Width;
     desc.Height         = pDesc->Height;
@@ -283,7 +355,7 @@ namespace dxvk {
       return S_FALSE;
     
     try {
-      Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &desc, nullptr, nullptr);
+      Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &desc, nullptr, nullptr, nullptr, pHeliosCreate);
       m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
       *ppTexture2D = texture.ref();
       return S_OK;
@@ -324,6 +396,36 @@ namespace dxvk {
     *ppTexture3D = texture3D;
     return S_OK;
   }
+
+
+  HRESULT D3D11Device::CreateTexture3DHelios(
+    const D3D11_TEXTURE3D_DESC*   pDesc,
+    const D3D11_SUBRESOURCE_DATA* pInitialData,
+    const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
+          ID3D11Texture3D**       ppTexture3D) {
+    InitReturnPtr(ppTexture3D);
+    if (!pDesc || !pHeliosCreate || !pHeliosCreate->ResourceAssociation)
+      return E_INVALIDARG;
+
+    D3D11_TEXTURE3D_DESC1 desc = { };
+    desc.Width = pDesc->Width;
+    desc.Height = pDesc->Height;
+    desc.Depth = pDesc->Depth;
+    desc.MipLevels = pDesc->MipLevels;
+    desc.Format = pDesc->Format;
+    desc.Usage = pDesc->Usage;
+    desc.BindFlags = pDesc->BindFlags;
+    desc.CPUAccessFlags = pDesc->CPUAccessFlags;
+    desc.MiscFlags = pDesc->MiscFlags;
+    desc.TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
+
+    ID3D11Texture3D1* texture = nullptr;
+    HRESULT hr = CreateTexture3DBase(&desc, pInitialData,
+      ppTexture3D ? &texture : nullptr, pHeliosCreate);
+    if (hr == S_OK)
+      *ppTexture3D = texture;
+    return hr;
+  }
   
   
   HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture3D1(
@@ -342,7 +444,8 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture3DBase(
     const D3D11_TEXTURE3D_DESC1*  pDesc,
     const D3D11_SUBRESOURCE_DATA* pInitialData,
-          ID3D11Texture3D1**      ppTexture3D) {
+          ID3D11Texture3D1**      ppTexture3D,
+    const D3D11_HELIOS_CREATE_INFO* pHeliosCreate) {
     D3D11_COMMON_TEXTURE_DESC desc;
     desc.Width          = pDesc->Width;
     desc.Height         = pDesc->Height;
@@ -370,7 +473,7 @@ namespace dxvk {
       return S_FALSE;
       
     try {
-      Com<D3D11Texture3D> texture = new D3D11Texture3D(this, &desc, nullptr);
+      Com<D3D11Texture3D> texture = new D3D11Texture3D(this, &desc, nullptr, pHeliosCreate);
       m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
       *ppTexture3D = texture.ref();
       return S_OK;

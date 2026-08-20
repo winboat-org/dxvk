@@ -197,10 +197,10 @@ namespace dxvk {
 
 
   Rc<DxvkDevice> DxvkAdapter::createDevice() {
-    Rc<DxvkDevice> device = createDevice(false);
+    Rc<DxvkDevice> device = createDevice(false, nullptr);
 
     if (!device)
-      device = createDevice(true);
+      device = createDevice(true, nullptr);
 
     if (!device)
       throw DxvkError("Failed to initialize DXVK device.");
@@ -209,7 +209,25 @@ namespace dxvk {
   }
 
 
-  Rc<DxvkDevice> DxvkAdapter::createDevice(bool safeMode) {
+  Rc<DxvkDevice> DxvkAdapter::createDevice(
+    const DxvkHeliosOuterOps& heliosOuterOps) {
+    if (!m_instance->isRecordOnlyDirect() || !heliosOuterOps)
+      throw DxvkError("Invalid Helios record-only device construction edge.");
+
+    Rc<DxvkDevice> device = createDevice(false, &heliosOuterOps);
+
+    if (!device)
+      device = createDevice(true, &heliosOuterOps);
+
+    if (!device)
+      throw DxvkError("Failed to initialize Helios record-only DXVK device.");
+
+    return device;
+  }
+
+
+  Rc<DxvkDevice> DxvkAdapter::createDevice(bool safeMode,
+    const DxvkHeliosOuterOps* heliosOuterOps) {
     auto vk = m_instance->vki();
 
     DxvkDeviceCapabilities caps(*m_instance, m_handle, nullptr, safeMode);
@@ -302,7 +320,8 @@ namespace dxvk {
     deviceQueues.transfer = getDeviceQueue(vkd, caps, queueMapping.transfer);
     deviceQueues.sparse   = getDeviceQueue(vkd, caps, queueMapping.sparse);
 
-    return new DxvkDevice(m_instance, this, vkd, caps, deviceQueues, DxvkQueueCallback());
+    return new DxvkDevice(m_instance, this, vkd, caps, deviceQueues,
+      DxvkQueueCallback(), heliosOuterOps ? *heliosOuterOps : DxvkHeliosOuterOps());
   }
 
 

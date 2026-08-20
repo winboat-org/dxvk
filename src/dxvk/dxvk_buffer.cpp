@@ -119,6 +119,7 @@ namespace dxvk {
 
   bool DxvkBuffer::canRelocate() const {
     return !m_bufferInfo.mapPtr && !m_stableAddress
+        && !m_info.heliosAssociation.outer_allocation_token
         && !(m_info.flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT);
   }
 

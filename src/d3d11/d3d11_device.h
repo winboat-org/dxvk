@@ -96,15 +96,33 @@ namespace dxvk {
       const D3D11_BUFFER_DESC*      pDesc,
       const D3D11_SUBRESOURCE_DATA* pInitialData,
             ID3D11Buffer**          ppBuffer);
+
+    HRESULT CreateBufferHelios(
+      const D3D11_BUFFER_DESC*      pDesc,
+      const D3D11_SUBRESOURCE_DATA* pInitialData,
+      const HeliosResourceAssociationV1* pAssociation,
+            ID3D11Buffer**          ppBuffer);
     
     HRESULT STDMETHODCALLTYPE CreateTexture1D(
       const D3D11_TEXTURE1D_DESC*   pDesc,
       const D3D11_SUBRESOURCE_DATA* pInitialData,
             ID3D11Texture1D**       ppTexture1D);
+
+    HRESULT CreateTexture1DHelios(
+      const D3D11_TEXTURE1D_DESC*   pDesc,
+      const D3D11_SUBRESOURCE_DATA* pInitialData,
+      const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
+            ID3D11Texture1D**       ppTexture1D);
     
     HRESULT STDMETHODCALLTYPE CreateTexture2D(
       const D3D11_TEXTURE2D_DESC*   pDesc,
       const D3D11_SUBRESOURCE_DATA* pInitialData,
+            ID3D11Texture2D**       ppTexture2D);
+
+    HRESULT CreateTexture2DHelios(
+      const D3D11_TEXTURE2D_DESC*   pDesc,
+      const D3D11_SUBRESOURCE_DATA* pInitialData,
+      const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
             ID3D11Texture2D**       ppTexture2D);
     
     HRESULT STDMETHODCALLTYPE CreateTexture2D1(
@@ -115,11 +133,18 @@ namespace dxvk {
     HRESULT STDMETHODCALLTYPE CreateTexture2DBase(
       const D3D11_TEXTURE2D_DESC1*  pDesc,
       const D3D11_SUBRESOURCE_DATA* pInitialData,
-            ID3D11Texture2D1**      ppTexture2D);
+            ID3D11Texture2D1**      ppTexture2D,
+      const D3D11_HELIOS_CREATE_INFO* pHeliosCreate = nullptr);
     
     HRESULT STDMETHODCALLTYPE CreateTexture3D(
       const D3D11_TEXTURE3D_DESC*   pDesc,
       const D3D11_SUBRESOURCE_DATA* pInitialData,
+            ID3D11Texture3D**       ppTexture3D);
+
+    HRESULT CreateTexture3DHelios(
+      const D3D11_TEXTURE3D_DESC*   pDesc,
+      const D3D11_SUBRESOURCE_DATA* pInitialData,
+      const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
             ID3D11Texture3D**       ppTexture3D);
     
     HRESULT STDMETHODCALLTYPE CreateTexture3D1(
@@ -130,7 +155,20 @@ namespace dxvk {
     HRESULT STDMETHODCALLTYPE CreateTexture3DBase(
       const D3D11_TEXTURE3D_DESC1*  pDesc,
       const D3D11_SUBRESOURCE_DATA* pInitialData,
-            ID3D11Texture3D1**      ppTexture3D);
+            ID3D11Texture3D1**      ppTexture3D,
+      const D3D11_HELIOS_CREATE_INFO* pHeliosCreate = nullptr);
+
+    HRESULT CreateBufferBase(
+      const D3D11_BUFFER_DESC*      pDesc,
+      const D3D11_SUBRESOURCE_DATA* pInitialData,
+      const HeliosResourceAssociationV1* pAssociation,
+            ID3D11Buffer**          ppBuffer);
+
+    HRESULT CreateTexture1DBase(
+      const D3D11_TEXTURE1D_DESC*   pDesc,
+      const D3D11_SUBRESOURCE_DATA* pInitialData,
+      const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
+            ID3D11Texture1D**       ppTexture1D);
     
     HRESULT STDMETHODCALLTYPE CreateShaderResourceView(
             ID3D11Resource*                   pResource,

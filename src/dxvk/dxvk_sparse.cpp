@@ -525,7 +525,12 @@ namespace dxvk {
       bindInfo.pSignalSemaphores = m_signalSemaphores.data();
     }
 
-    VkResult vr = vk->vkQueueBindSparse(queue, 1, &bindInfo, VK_NULL_HANDLE);
+    void* outerScope = device->beginHeliosOuterSubmit();
+    VkResult vr = outerScope
+      ? vk->vkQueueBindSparse(queue, 1, &bindInfo, VK_NULL_HANDLE)
+      : VK_ERROR_DEVICE_LOST;
+    if (outerScope)
+      vr = device->finishHeliosOuterSubmit(outerScope, vr);
 
     if (vr) {
       Logger::err(str::format("Sparse binding failed: ", vr));

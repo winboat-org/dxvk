@@ -19,6 +19,13 @@ namespace dxvk {
     VkInstance                instance        = VK_NULL_HANDLE;
     uint32_t                  extensionCount  = 0u;
     const char**              extensionNames  = nullptr;
+    /// The imported instance is the package-owned record-only translator.
+    /// This suppresses WSI/VR extension providers and every second-instance
+    /// path while preserving generic imported-instance behaviour.
+    bool                      recordOnlyDirect = false;
+    /// Exact lower-ICD module base returned by the A5 table. Every resolved
+    /// procedure must belong to this module or resolution fails closed.
+    HMODULE                   expectedModule  = nullptr;
   };
 
 
@@ -103,6 +110,10 @@ namespace dxvk {
      */
     VkInstance handle() {
       return m_vki->instance();
+    }
+
+    bool isRecordOnlyDirect() const {
+      return m_recordOnlyDirect;
     }
 
      /**
@@ -193,6 +204,7 @@ namespace dxvk {
     
   private:
 
+    bool                      m_recordOnlyDirect = false;
     Config                    m_config;
     DxvkOptions               m_options;
 

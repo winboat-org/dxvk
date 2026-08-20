@@ -43,7 +43,8 @@ namespace dxvk {
     D3D11Buffer(
             D3D11Device*                pDevice,
       const D3D11_BUFFER_DESC*          pDesc,
-      const D3D11_ON_12_RESOURCE_INFO*  p11on12Info);
+      const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
+      const HeliosResourceAssociationV1* pHeliosAssociation = nullptr);
 
     ~D3D11Buffer();
     

@@ -24,13 +24,19 @@ namespace dxvk::vk {
   struct LibraryLoader : public RcObject {
     LibraryLoader();
     LibraryLoader(PFN_vkGetInstanceProcAddr loaderProc);
+    LibraryLoader(PFN_vkGetInstanceProcAddr loaderProc,
+                  VkInstance lookupInstance,
+                  HMODULE expectedModule);
     ~LibraryLoader();
     PFN_vkVoidFunction sym(VkInstance instance, const char* name) const;
     PFN_vkVoidFunction sym(const char* name) const;
+    bool ownsProc(PFN_vkVoidFunction proc) const;
     PFN_vkGetInstanceProcAddr getLoaderProc() const { return m_getInstanceProcAddr; }
   protected:
     HMODULE                   m_library             = nullptr;
     PFN_vkGetInstanceProcAddr m_getInstanceProcAddr = nullptr;
+    VkInstance                m_lookupInstance       = VK_NULL_HANDLE;
+    HMODULE                   m_expectedModule       = nullptr;
   };
   
   
@@ -43,6 +49,7 @@ namespace dxvk::vk {
   struct InstanceLoader : public RcObject {
     InstanceLoader(const Rc<LibraryLoader>& library, bool owned, VkInstance instance);
     PFN_vkVoidFunction sym(const char* name) const;
+    bool ownsProc(PFN_vkVoidFunction proc) const { return m_library->ownsProc(proc); }
     PFN_vkGetInstanceProcAddr getLoaderProc() const { return m_library->getLoaderProc(); }
     VkInstance instance() const { return m_instance; }
   protected:
@@ -79,6 +86,9 @@ namespace dxvk::vk {
   struct LibraryFn : LibraryLoader {
     LibraryFn();
     LibraryFn(PFN_vkGetInstanceProcAddr loaderProc);
+    LibraryFn(PFN_vkGetInstanceProcAddr loaderProc,
+              VkInstance lookupInstance,
+              HMODULE expectedModule);
     ~LibraryFn();
     
     VULKAN_FN(vkCreateInstance);
