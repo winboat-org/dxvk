@@ -65,16 +65,6 @@ namespace dxvk {
       return &m_d3d10;
     }
 
-    /**
-     * \brief Helios staged-import image behind this view, or null
-     *
-     * Cached at view creation so the per-draw staleness gate can test
-     * bound SRVs with a single pointer check (null = not a staged import).
-     */
-    const Rc<DxvkImage>& GetHeliosStagedImage() const {
-      return m_heliosStagedImage;
-    }
-
     static HRESULT GetDescFromResource(
             ID3D11Resource*                   pResource,
             D3D11_SHADER_RESOURCE_VIEW_DESC1* pDesc);
@@ -97,7 +87,6 @@ namespace dxvk {
     D3D11_VK_VIEW_INFO                m_info;
     Rc<DxvkBufferView>                m_bufferView;
     Rc<DxvkImageView>                 m_imageView;
-    Rc<DxvkImage>                     m_heliosStagedImage;
     D3D10ShaderResourceView           m_d3d10;
 
     D3DDestructionNotifier            m_destructionNotifier;

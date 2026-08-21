@@ -56,30 +56,6 @@ namespace dxvk {
             D3D11CommonTexture*         pTexture,
       const D3D11_SUBRESOURCE_DATA*     pInitialData);
 
-    /**
-     * \brief Initializes a Helios GDI-staged texture's content
-     *
-     * Opened shared textures skip the normal InitTexture path, but a staged
-     * texture is a private device-local surface with no content and an
-     * UNDEFINED layout. Record a buffer->image copy from its staging buffer so
-     * it is transitioned to GENERAL and carries the executor's bytes before
-     * dwm can sample it (otherwise it is sampled UNDEFINED and NVIDIA loses the
-     * device). No-op if the texture is not GDI-staged.
-     */
-    void InitHeliosStagedTexture(
-            D3D11CommonTexture*         pTexture);
-
-    /**
-     * \brief Clears a Helios debug-magenta private texture to solid magenta
-     *
-     * Localization diagnostic (HELIOS_DEBUG_MAGENTA): stands in for a
-     * device-local shared import so we can tell whether dwm samples the exact
-     * image we hand it (magenta shows) or a different surface (still black).
-     * No-op unless the texture is a Helios debug-magenta image.
-     */
-    void InitHeliosMagentaTexture(
-            D3D11CommonTexture*         pTexture);
-
     void InitUavCounter(
             D3D11UnorderedAccessView*   pUav);
     

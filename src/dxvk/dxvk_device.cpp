@@ -37,8 +37,7 @@ namespace dxvk {
     m_perfHints         (getPerfHints()),
     m_objects           (this),
     m_checkpoints       (this),
-    m_submissionQueue   (this, queueCallback),
-    m_heliosScanoutAcquire(this) {
+    m_submissionQueue   (this, queueCallback) {
 
     // Construct the fixed trace storage before any producer can enqueue work
     // when the targeted feed trace is enabled. This keeps the hot sites to
@@ -76,12 +75,6 @@ namespace dxvk {
     // The best we can do is just wait for the Vulkan device to be idle.
     if (this_thread::isInModuleDetachment())
       return;
-
-    // Helios D4a: release every armed scanout-reuse gate and join the
-    // signaler BEFORE waitForIdle — an unsatisfied TOP_OF_PIPE gate wait
-    // would park the queue and turn waitForIdle into the vn 8 s
-    // forward-progress device-lost path (spec §5.3 teardown order).
-    m_heliosScanoutAcquire.shutdown();
 
     // Wait for all pending Vulkan commands to be
     // executed before we destroy any resources.

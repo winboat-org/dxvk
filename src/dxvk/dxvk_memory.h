@@ -55,15 +55,6 @@ namespace dxvk {
       // we could add a `int fd` here, etc.
       HANDLE handle = INVALID_HANDLE_VALUE;
     };
-    /// Helios KMT-mode typed import identity. `heliosResourceId` is the exact creator Venus allocation identity:
-    /// The image imports backing memory by this resource id (no HANDLE
-    /// punning), allocating with the creator's exact allocation size and memory
-    /// type as recorded by the KMD's open-identity ABI — vkr's OPAQUE-fd import
-    /// requires an exact-size match, and the memory type must be one the host
-    /// accepts for the exported handle; the opener's own requirements are neither.
-    uint32_t     heliosResourceId       = 0u;
-    VkDeviceSize heliosAllocSize        = 0u;
-    uint32_t     heliosMemoryTypeIndex  = ~0u;
   };
 
 
@@ -610,40 +601,6 @@ namespace dxvk {
     }
 
     /**
-     * \brief Marks this exact backing allocation as a present-sync producer
-     *
-     * The `(fence generation, resource id)` tuple is
-     * immutable for this publication. The marker is written only after its HPS2
-     * slot publication succeeded, then taken by the allocation destructor
-     * before it frees that memory.
-     */
-    bool setHeliosPresentSlot(uint32_t resid, uint32_t fenceId) {
-      if (!resid || !fenceId)
-        return false;
-
-      const uint64_t slot = (uint64_t(fenceId) << 32) | resid;
-      uint64_t expected = 0u;
-      if (m_heliosPresentSlot.compare_exchange_strong(expected, slot,
-          std::memory_order_release, std::memory_order_acquire)) {
-        return true;
-      }
-      return expected == slot;
-    }
-
-    struct HeliosPresentSlot {
-      uint32_t resid;
-      uint32_t fenceId;
-    };
-
-    HeliosPresentSlot takeHeliosPresentSlot() {
-      const uint64_t slot = m_heliosPresentSlot.exchange(0u, std::memory_order_acq_rel);
-      return {
-        uint32_t(slot),
-        uint32_t(slot >> 32),
-      };
-    }
-
-    /**
      * \brief Queries buffer info
      * \returns Buffer info
      */
@@ -728,7 +685,6 @@ namespace dxvk {
     D3DKMT_HANDLE               m_kmtLocal = 0;
     D3DKMT_HANDLE               m_kmtGlobal = 0;
     bool                        m_ownsKmtHandles = false;
-    std::atomic<uint64_t>       m_heliosPresentSlot = { 0u };
     HeliosResourceAssociationV1 m_heliosAssociation = { };
 
     DxvkSparsePageTable*        m_sparsePageTable = nullptr;
@@ -1093,14 +1049,6 @@ namespace dxvk {
     /// Exact package-owned association record for an outer WDDM allocation.
     /// Borrowed only for the synchronous vkAllocateMemory call.
     const HeliosResourceAssociationV1* heliosAssociation = nullptr;
-    /// Helios import identity: when nonzero, the dedicated allocation uses
-    /// EXACTLY this allocationSize instead of the image's own memory
-    /// requirements (the creator's recorded venus allocation size — required
-    /// for vkr's exact-size OPAQUE-fd import of a shared resource).
-    VkDeviceSize importSizeOverride = 0u;
-    /// Helios import identity: when != ~0u, restricts the allocation to this
-    /// memory type (the creator's recorded memoryTypeIndex).
-    uint32_t importMemoryTypeIndex = ~0u;
   };
 
 
@@ -1339,37 +1287,6 @@ namespace dxvk {
       const VkImageCreateInfo&          createInfo,
       const DxvkAllocationInfo&         allocationInfo,
             VkImage                     imageHandle);
-
-    /**
-     * \brief Whether a memory type index is host-visible
-     *
-     * Helios GDI staging: used to distinguish the KMD's host-visible standard
-     * allocations (written linearly by the kernel GDI executor through the BAR)
-     * from ordinary device-local shared textures.
-     * \param [in] index Memory type index
-     * \returns \c true if the type has HOST_VISIBLE set
-     */
-    bool isHostVisibleMemoryType(uint32_t index) const;
-
-    /**
-     * \brief Imports a Venus resource as a host-visible staging buffer
-     *
-     * Helios GDI staging (approach A): imports the creator's host-visible venus
-     * memory (the executor's linear BGRA bytes) as a \c VkBuffer instead of an
-     * image, so the pitch can be stated explicitly on a later
-     * \c vkCmdCopyBufferToImage into a private device-local sampled image. A
-     * linear buffer accepts the host-visible memory type that an OPTIMAL
-     * device-local image rejects (VUID-01615), and unlike a linear image its
-     * source row pitch is caller-chosen, not driver-chosen.
-     * \param [in] allocSize Creator's exact venus allocation size
-     * \param [in] memoryTypeIndex Creator's host-visible memory type index
-     * \param [in] resourceId Venus resource id to import
-     * \returns Owning allocation, or null on failure (caller must fall back)
-     */
-    Rc<DxvkResourceAllocation> importVenusStagingBuffer(
-            VkDeviceSize                allocSize,
-            uint32_t                    memoryTypeIndex,
-            uint32_t                    resourceId);
 
     /**
      * \brief Queries memory stats

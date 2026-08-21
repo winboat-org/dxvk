@@ -5,21 +5,7 @@
 #include "d3d11_device.h"
 
 #include "../util/util_win32_compat.h"
-#include "../util/util_shared_res.h"
-
 namespace dxvk {
-
-  namespace {
-    // Default ON. Helios shared resources are always KMT-only: the UMD is the
-    // only thing that hosts this engine, and it used to force
-    // HELIOS_DXVK_KMT_SHARED=1 into its own environment before any DXVK device
-    // existed, so this could not be false in any shipping configuration. The
-    // env var survives only as the `=0` disable for a standalone DXVK build.
-    bool heliosKmtOnlySharedResources() {
-      const char* value = std::getenv("HELIOS_DXVK_KMT_SHARED");
-      return !(value && value[0] == '0');
-    }
-  }
 
   D3D11DXGIKeyedMutex::D3D11DXGIKeyedMutex(
           ID3D11Resource* pResource,
@@ -245,19 +231,10 @@ namespace dxvk {
     }
 
     D3DKMT_HANDLE global = texture->GetImage()->storage()->kmtGlobal();
-    if (global) {
-      *pSharedHandle = reinterpret_cast<HANDLE>(global);
-      return S_OK;
-    }
-
-    /* try legacy Proton shared resource implementation */
-
-    HANDLE kmtHandle = texture->GetImage()->sharedHandle();
-
-    if (kmtHandle == INVALID_HANDLE_VALUE)
+    if (!global)
       return E_INVALIDARG;
 
-    *pSharedHandle = kmtHandle;
+    *pSharedHandle = reinterpret_cast<HANDLE>(global);
     return S_OK;
   }
 
@@ -334,7 +311,7 @@ namespace dxvk {
     }
 
     D3DKMT_HANDLE local = texture->GetImage()->storage()->kmtLocal();
-    if (heliosKmtOnlySharedResources() && !local)
+    if (!local)
       return DXGI_ERROR_INVALID_CALL;
 
     auto keyedMutex = texture->GetImage()->getKeyedMutex();
@@ -344,7 +321,7 @@ namespace dxvk {
       auto sync = keyedMutex->getSyncObject();
       if (sync && sync->kmtLocal())
         handles[count++] = sync->kmtLocal();
-      else if (heliosKmtOnlySharedResources()) {
+      else {
         Logger::warn("D3D11DXGIResource::CreateSharedHandle: keyed mutex has no KMT sync object");
         return DXGI_ERROR_INVALID_CALL;
       }
@@ -360,21 +337,7 @@ namespace dxvk {
       Logger::warn(str::format("D3D11DXGIResource::CreateSharedHandle: D3DKMTShareObjects(resource) failed: ", status));
     }
 
-    if (heliosKmtOnlySharedResources())
-      return DXGI_ERROR_INVALID_CALL;
-
-    /* try legacy Proton shared resource implementation */
-
-    if (lpName)
-      Logger::warn("Naming shared resources not supported");
-
-    HANDLE handle = texture->GetImage()->sharedHandle();
-
-    if (handle == INVALID_HANDLE_VALUE)
-      return E_INVALIDARG;
-
-    *pHandle = handle;
-    return S_OK;
+    return DXGI_ERROR_INVALID_CALL;
   }
 
 

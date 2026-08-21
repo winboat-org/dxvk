@@ -1,27 +1,12 @@
-#include <cstdlib>
-
 #include "d3d11_device.h"
 #include "d3d11_context_imm.h"
 #include "d3d11_gdi.h"
 #include "d3d11_texture.h"
 
-#include "../util/util_shared_res.h"
 #include "../util/util_win32_compat.h"
 
 namespace dxvk {
 
-  namespace {
-    // Default ON. Helios shared resources are always KMT-only: the UMD is the
-    // only thing that hosts this engine, and it used to force
-    // HELIOS_DXVK_KMT_SHARED=1 into its own environment before any DXVK device
-    // existed, so this could not be false in any shipping configuration. The
-    // env var survives only as the `=0` disable for a standalone DXVK build.
-    bool heliosKmtOnlySharedResources() {
-      const char* value = std::getenv("HELIOS_DXVK_KMT_SHARED");
-      return !(value && value[0] == '0');
-    }
-  }
-  
   D3D11CommonTexture::D3D11CommonTexture(
           ID3D11Resource*             pInterface,
           D3D11Device*                pDevice,
@@ -31,7 +16,6 @@ namespace dxvk {
           DXGI_USAGE                  DxgiUsage,
           VkImage                     vkImage,
           HANDLE                      hSharedHandle,
-    const D3D11_HELIOS_IMPORT_INFO*   pHeliosImport,
     const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate)
   : m_interface(pInterface), m_device(pDevice), m_dimension(Dimension), m_desc(*pDesc),
     m_11on12(p11on12Info ? *p11on12Info : D3D11_ON_12_RESOURCE_INFO()), m_dxgiUsage(DxgiUsage) {
@@ -82,43 +66,6 @@ namespace dxvk {
         : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT;
       imageInfo.sharing.handle = hSharedHandle;
 
-      // Helios typed import: venus resid + creator allocation identity from
-      // the KMD open-identity record (no HANDLE punning). Forces Import mode
-      // regardless of the (unused) shared handle value.
-      if (pHeliosImport && pHeliosImport->ResourceId) {
-        imageInfo.sharing.mode = DxvkSharedHandleMode::Import;
-        imageInfo.sharing.heliosResourceId      = pHeliosImport->ResourceId;
-        imageInfo.sharing.heliosAllocSize       = pHeliosImport->AllocSize;
-        imageInfo.sharing.heliosMemoryTypeIndex = pHeliosImport->MemoryTypeIndex;
-
-        // Symmetric scan-out-primary import: reconstruct the creator's exact
-        // plain LINEAR + DMA_BUF image. Import mode is preserved, and ordinary
-        // shared OPTIMAL images are untouched.
-        if (pHeliosImport->ScanoutLinear) {
-          imageInfo.heliosScanoutPrimary = VK_TRUE;
-          imageInfo.tiling                = VK_IMAGE_TILING_LINEAR;
-          imageInfo.initialLayout         = VK_IMAGE_LAYOUT_PREINITIALIZED;
-          imageInfo.sharing.type          = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-        }
-        if (pHeliosImport->LinearScanoutTarget) {
-          imageInfo.heliosLinearScanoutTarget = VK_TRUE;
-          imageInfo.tiling = VK_IMAGE_TILING_LINEAR;
-        }
-        if (pHeliosImport->CrossContextOptimal) {
-          imageInfo.heliosCrossContextOptimal = VK_TRUE;
-          imageInfo.sharing.type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-        }
-      }
-    }
-
-    // Exact pPrimaryDesc path: preserve normal OPTIMAL render-target
-    // semantics while changing only the external allocation handle to DMA_BUF.
-    if (pHeliosCreate && pHeliosCreate->DirectOptimalScanout) {
-      imageInfo.heliosDirectOptimalScanout = VK_TRUE;
-      imageInfo.shared                     = VK_TRUE;
-      imageInfo.sharing.mode               = DxvkSharedHandleMode::Export;
-      imageInfo.sharing.type               = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-      imageInfo.sharing.handle             = INVALID_HANDLE_VALUE;
     }
 
     if (pHeliosCreate && pHeliosCreate->ResourceAssociation)
@@ -220,41 +167,9 @@ namespace dxvk {
       imageInfo.shared = VK_TRUE;
     }
 
-    // The host reconstructs the exact Windows-designated primary allocation as
-    // a sampled, mutable OPTIMAL image. Keep the producer's VkImageCreateInfo
-    // and common layout identical even when the application's bind flags only
-    // request PRESENT + RENDER_TARGET (as Fire Strike does). This path is
-    // selected solely from pPrimaryDesc, never from resource geometry or the
-    // creating process.
-    if (pHeliosCreate && pHeliosCreate->DirectOptimalScanout) {
-      imageInfo.usage  |= VK_IMAGE_USAGE_SAMPLED_BIT;
-      imageInfo.stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-      imageInfo.access |= VK_ACCESS_SHADER_READ_BIT;
-      imageInfo.flags  |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-    }
-
-    // Helios copy-free cross-process fix (13th session): a shared OPTIMAL image
-    // and its cross-process importer alias one host allocation, but NVIDIA color
-    // compression (DCC) keeps a PER-IMAGE compression-control surface that is NOT
-    // carried across the OPAQUE_FD share — so the importer decodes the exporter's
-    // compressed bytes with empty metadata and samples black (the black desktop),
-    // even though every VkImageCreateInfo field matches. Dropping the view-format
-    // list (while KEEPING VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT so sRGB/UNORM views
-    // still work) forces the driver to store the image uncompressed: the raw
-    // pixels then live directly in the shared memory and the matching-create-info
-    // importer reads them with NO per-frame copy. Applied to both endpoints (this
-    // is the single InitImageInfo both the exporter and importer run through), so
-    // creator and opener stay byte-identical.
-    if (imageInfo.shared && (imageInfo.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
-      imageInfo.viewFormatCount = 0;
-      imageInfo.viewFormats     = nullptr;
-    }
-
     // Some image formats (i.e. the R32G32B32 ones) are
     // only supported with linear tiling on most GPUs
     if (!CheckImageSupport(&imageInfo, VK_IMAGE_TILING_OPTIMAL)) {
-      if (pHeliosCreate && pHeliosCreate->DirectOptimalScanout)
-        throw DxvkError("D3D11: OPTIMAL tiling unsupported for Helios scan-out primary");
       imageInfo.tiling = VK_IMAGE_TILING_LINEAR;
     }
     
@@ -262,18 +177,6 @@ namespace dxvk {
     VkMemoryPropertyFlags memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     std::tie(m_mapMode, memoryProperties) = DetermineMapMode(pDevice, &imageInfo);
 
-    // The scan-out primary is a device-local surface the host scans out of; it
-    // must never take the CPU direct-map path below. Force map mode NONE + a
-    // device-local allocation regardless of the desc's CPU-access flags. This
-    // applies to the direct OPTIMAL create path and to the symmetric KMD-owned
-    // LINEAR import paths.
-    if ((pHeliosCreate && pHeliosCreate->DirectOptimalScanout) ||
-        (pHeliosImport && (pHeliosImport->ScanoutLinear ||
-                           pHeliosImport->LinearScanoutTarget))) {
-      m_mapMode        = D3D11_COMMON_TEXTURE_MAP_MODE_NONE;
-      memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    }
-    
     // If the image is mapped directly to host memory, we need
     // to enable linear tiling, and DXVK needs to be aware that
     // the image can be accessed by the host.
@@ -321,17 +224,8 @@ namespace dxvk {
     // can choose a better layout for the image based on how
     // it is going to be used by the game.
     if (imageInfo.tiling == VK_IMAGE_TILING_OPTIMAL && !isMultiPlane
-     && (imageInfo.sharing.mode == DxvkSharedHandleMode::None
-      || (pHeliosCreate && pHeliosCreate->DirectOptimalScanout))) {
-      // A DirectOptimal image normally uses the most specific canonical
-      // layout (SHADER_READ_ONLY_OPTIMAL for scan-out/snapshot usage). The KMD
-      // WindowedBlt importer, however, consumes its snapshot as a transfer
-      // source in GENERAL. Make that cross-instance contract true by
-      // construction instead of pairing mismatched queue-family barriers.
-      imageInfo.layout = pHeliosCreate && pHeliosCreate->KmdTransferSource
-        ? VK_IMAGE_LAYOUT_GENERAL
-        : OptimizeLayout(imageInfo.usage);
-    }
+     && imageInfo.sharing.mode == DxvkSharedHandleMode::None)
+      imageInfo.layout = OptimizeLayout(imageInfo.usage);
 
     // Check if we can actually create the image
     if (!CheckImageSupport(&imageInfo, imageInfo.tiling)) {
@@ -369,36 +263,12 @@ namespace dxvk {
         }
       }
 
-      ExportImageInfo();
     }
 
-    // Helios staged-texture init: transition the staged image to GENERAL and fill
-    // it before dwm's first sample. Required (re-enabled 13th session): with
-    // device-local staging active, MANY staged surfaces open, and each is sampled
-    // UNDEFINED on its first frame without this (host vkr: "expects GENERAL,
-    // current UNDEFINED" -> garbage). Fix A alone (m_globalLayout=initialLayout)
-    // does not reliably get the transition emitted before the composition draw.
-    if (m_image != nullptr && m_image->isHeliosGdiStaged())
-      m_device->InitializeStagedTexture(this);
-
-    // Helios magenta localization diagnostic: a private device-local image
-    // standing in for a device-local shared import (HELIOS_DEBUG_MAGENTA) is
-    // never initialized by the normal open path, so clear it to solid magenta
-    // here so dwm samples magenta instead of an UNDEFINED/black surface.
-    if (m_image != nullptr && m_image->isHeliosDebugMagenta())
-      m_device->InitializeMagentaTexture(this);
   }
 
 
-  D3D11CommonTexture::~D3D11CommonTexture() {
-    // Helios: unenroll from the staged-refresh set. The set holds an Rc on
-    // enrolled images, so without this a dead producer's imports get
-    // zombie-refreshed (full-image copy + failed slot lookup per command
-    // list) until the idle prune, pinning the venus resources alive too.
-    // The flag is checked (and the entry erased) on the CS thread.
-    if (m_image != nullptr && m_image->isHeliosGdiStaged())
-      m_image->setHeliosOrphaned();
-  }
+  D3D11CommonTexture::~D3D11CommonTexture() { }
   
   
   VkDeviceSize D3D11CommonTexture::ComputeMappedOffset(UINT Subresource, UINT Plane, VkOffset3D Offset) const {
@@ -865,118 +735,6 @@ namespace dxvk {
   }
   
   
-  void D3D11CommonTexture::ExportImageInfo() {
-    // Helios: a shared texture whose storage/export path failed upstream (for
-    // example the host refusing the memory-export blob) can reach here without
-    // backing storage; the storage()/sharedHandle() derefs below then AV
-    // (observed live: DWM crash loop at ExportImageInfo+0x338). Exporting is
-    // meaningless without storage — degrade to no-export instead of crashing.
-    if (m_image == nullptr || m_image->storage() == nullptr) {
-      Logger::warn("D3D11CommonTexture::ExportImageInfo: image has no storage, skipping export");
-      return;
-    }
-
-    struct d3dkmt_d3d11_desc desc = { };
-    desc.dxgi.size = sizeof(desc);
-    desc.dxgi.version = 4;
-    desc.dxgi.keyed_mutex = !!(m_desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX);
-    desc.dxgi.nt_shared = !!(m_desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE);
-    desc.dimension = m_dimension;
-
-    if (desc.dxgi.keyed_mutex) {
-      auto keyedMutex = m_image->getKeyedMutex();
-      desc.dxgi.mutex_handle = keyedMutex
-        ? (heliosKmtOnlySharedResources() ? keyedMutex->kmtLocal() : keyedMutex->kmtGlobal())
-        : 0;
-
-      if (keyedMutex) {
-        auto syncObject = keyedMutex->getSyncObject();
-        desc.dxgi.sync_handle = syncObject ? syncObject->kmtGlobal() : 0;
-      }
-    }
-
-    switch (m_dimension) {
-      case D3D11_RESOURCE_DIMENSION_UNKNOWN: break;
-      case D3D11_RESOURCE_DIMENSION_BUFFER: break;
-      case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
-        desc.d3d11_1d.Width = m_desc.Width;
-        desc.d3d11_1d.MipLevels = m_desc.MipLevels;
-        desc.d3d11_1d.ArraySize = m_desc.ArraySize;
-        desc.d3d11_1d.Format = m_desc.Format;
-        desc.d3d11_1d.Usage = m_desc.Usage;
-        desc.d3d11_1d.BindFlags = m_desc.BindFlags;
-        desc.d3d11_1d.CPUAccessFlags = m_desc.CPUAccessFlags;
-        desc.d3d11_1d.MiscFlags = m_desc.MiscFlags;
-        break;
-      case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-        desc.d3d11_2d.Width = m_desc.Width;
-        desc.d3d11_2d.Height = m_desc.Height;
-        desc.d3d11_2d.MipLevels = m_desc.MipLevels;
-        desc.d3d11_2d.ArraySize = m_desc.ArraySize;
-        desc.d3d11_2d.Format = m_desc.Format;
-        desc.d3d11_2d.SampleDesc = m_desc.SampleDesc;
-        desc.d3d11_2d.Usage = m_desc.Usage;
-        desc.d3d11_2d.BindFlags = m_desc.BindFlags;
-        desc.d3d11_2d.CPUAccessFlags = m_desc.CPUAccessFlags;
-        desc.d3d11_2d.MiscFlags = m_desc.MiscFlags;
-        break;
-      case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-        desc.d3d11_3d.Width = m_desc.Width;
-        desc.d3d11_3d.Height = m_desc.Height;
-        desc.d3d11_3d.Depth = m_desc.Depth;
-        desc.d3d11_3d.MipLevels = m_desc.MipLevels;
-        desc.d3d11_3d.Format = m_desc.Format;
-        desc.d3d11_3d.Usage = m_desc.Usage;
-        desc.d3d11_3d.BindFlags = m_desc.BindFlags;
-        desc.d3d11_3d.CPUAccessFlags = m_desc.CPUAccessFlags;
-        desc.d3d11_3d.MiscFlags = m_desc.MiscFlags;
-        break;
-    }
-
-    if (heliosKmtOnlySharedResources() && m_image->storage()->kmtLocal())
-      return;
-
-    D3DKMT_ESCAPE escape = { };
-    escape.Type = D3DKMT_ESCAPE_UPDATE_RESOURCE_WINE;
-    escape.pPrivateDriverData = &desc;
-    escape.PrivateDriverDataSize = sizeof(desc);
-    escape.hContext = m_image->storage()->kmtLocal();
-
-    if (!D3DKMTEscape(&escape))
-      return;
-
-    /* try the legacy Proton shared resource implementation */
-
-    HANDLE hSharedHandle;
-
-    if (m_desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
-      hSharedHandle = m_image->sharedHandle();
-    else
-      hSharedHandle = openKmtHandle( m_image->sharedHandle() );
-
-    DxvkSharedTextureMetadata metadata;
-
-    metadata.Width          = m_desc.Width;
-    metadata.Height         = m_desc.Height;
-    metadata.MipLevels      = m_desc.MipLevels;
-    metadata.ArraySize      = m_desc.ArraySize;
-    metadata.Format         = m_desc.Format;
-    metadata.SampleDesc     = m_desc.SampleDesc;
-    metadata.Usage          = m_desc.Usage;
-    metadata.BindFlags      = m_desc.BindFlags;
-    metadata.CPUAccessFlags = m_desc.CPUAccessFlags;
-    metadata.MiscFlags      = m_desc.MiscFlags;
-    metadata.TextureLayout  = m_desc.TextureLayout;
-
-    if (hSharedHandle == INVALID_HANDLE_VALUE || !setSharedMetadata(hSharedHandle, &metadata, sizeof(metadata))) {
-      Logger::warn("D3D11: Failed to write shared resource info for a texture");
-    }
-
-    if (hSharedHandle != INVALID_HANDLE_VALUE)
-      CloseHandle(hSharedHandle);
-  }
-  
-  
   BOOL D3D11CommonTexture::IsR32UavCompatibleFormat(
           DXGI_FORMAT           Format) {
     return Format == DXGI_FORMAT_R8G8B8A8_TYPELESS
@@ -1428,7 +1186,7 @@ namespace dxvk {
     const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
     const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate)
   : D3D11DeviceChild<ID3D11Texture1D>(pDevice),
-    m_texture (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, VK_NULL_HANDLE, nullptr, nullptr, pHeliosCreate),
+    m_texture (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, VK_NULL_HANDLE, nullptr, pHeliosCreate),
     m_interop (this, &m_texture),
     m_surface (this),
     m_resource(this, pDevice),
@@ -1544,10 +1302,9 @@ namespace dxvk {
     const D3D11_COMMON_TEXTURE_DESC*  pDesc,
     const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
           HANDLE                      hSharedHandle,
-    const D3D11_HELIOS_IMPORT_INFO*   pHeliosImport,
     const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate)
   : D3D11DeviceChild<ID3D11Texture2D1>(pDevice),
-    m_texture   (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, VK_NULL_HANDLE, hSharedHandle, pHeliosImport, pHeliosCreate),
+    m_texture   (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, VK_NULL_HANDLE, hSharedHandle, pHeliosCreate),
     m_interop   (this, &m_texture),
     m_surface   (this),
     m_resource  (this, pDevice),
@@ -1741,7 +1498,7 @@ namespace dxvk {
     const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
     const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate)
   : D3D11DeviceChild<ID3D11Texture3D1>(pDevice),
-    m_texture (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, VK_NULL_HANDLE, nullptr, nullptr, pHeliosCreate),
+    m_texture (this, pDevice, pDesc, p11on12Info, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, VK_NULL_HANDLE, nullptr, pHeliosCreate),
     m_interop (this, &m_texture),
     m_resource(this, pDevice),
     m_d3d10   (this),

@@ -559,8 +559,6 @@ namespace dxvk {
     VkImageLayout OptimizeLayout(
             VkImageUsageFlags         Usage) const;
 
-    void ExportImageInfo();
-
   };
 
 }

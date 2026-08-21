@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 
 #include <dxbc/dxbc_container.h>
@@ -32,21 +31,7 @@
 
 #include "../wsi/wsi_window.h"
 
-#include "../util/util_shared_res.h"
-
 namespace dxvk {
-
-  namespace {
-    // Default ON. Helios shared resources are always KMT-only: the UMD is the
-    // only thing that hosts this engine, and it used to force
-    // HELIOS_DXVK_KMT_SHARED=1 into its own environment before any DXVK device
-    // existed, so this could not be false in any shipping configuration. The
-    // env var survives only as the `=0` disable for a standalone DXVK build.
-    bool heliosKmtOnlySharedResources() {
-      const char* value = std::getenv("HELIOS_DXVK_KMT_SHARED");
-      return !(value && value[0] == '0');
-    }
-  }
   
   constexpr uint32_t D3D11DXGIDevice::DefaultFrameLatency;
 
@@ -355,7 +340,7 @@ namespace dxvk {
       return S_FALSE;
     
     try {
-      Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &desc, nullptr, nullptr, nullptr, pHeliosCreate);
+      Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &desc, nullptr, nullptr, pHeliosCreate);
       m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
       *ppTexture2D = texture.ref();
       return S_OK;
@@ -1662,14 +1647,8 @@ namespace dxvk {
       }
     }
 
-    if (heliosKmtOnlySharedResources()) {
-      Logger::warn("D3D11Device::OpenSharedResource: D3DKMT open failed in Helios KMT mode");
-      return E_INVALIDARG;
-    }
-
-    /* try the legacy Proton shared resource implementation */
-    return OpenSharedResourceGeneric<true>(
-      hResource, ReturnedInterface, ppResource);
+    Logger::warn("D3D11Device::OpenSharedResource: ordinary D3DKMT open failed");
+    return E_INVALIDARG;
   }
   
   
@@ -1769,14 +1748,8 @@ namespace dxvk {
       }
     }
 
-    if (heliosKmtOnlySharedResources()) {
-      Logger::warn("D3D11Device::OpenSharedResource1: D3DKMT open failed in Helios KMT mode");
-      return E_INVALIDARG;
-    }
-
-    /* try the legacy Proton shared resource implementation */
-    return OpenSharedResourceGeneric<false>(
-      hResource, ReturnedInterface, ppResource);
+    Logger::warn("D3D11Device::OpenSharedResource1: ordinary D3DKMT open failed");
+    return E_INVALIDARG;
   }
 
   
@@ -2720,65 +2693,6 @@ namespace dxvk {
     }
 
     return ~0u;
-  }
-
-
-  template<bool IsKmtHandle>
-  HRESULT D3D11Device::OpenSharedResourceGeneric(
-          HANDLE      hResource,
-          REFIID      ReturnedInterface,
-          void**      ppResource) {
-#ifdef _WIN32
-    HANDLE ntHandle = IsKmtHandle ? openKmtHandle(hResource) : hResource;
-
-    if (ntHandle == INVALID_HANDLE_VALUE) {
-      Logger::warn(str::format("D3D11Device::OpenSharedResourceGeneric: Handle not found: ", hResource));
-      return E_INVALIDARG;
-    }
-
-    DxvkSharedTextureMetadata metadata;
-    bool ret = getSharedMetadata(ntHandle, &metadata, sizeof(metadata), NULL);
-
-    if (IsKmtHandle)
-      ::CloseHandle(ntHandle);
-
-    if (!ret) {
-      Logger::warn("D3D11Device::OpenSharedResourceGeneric: Failed to get shared resource info for a texture");
-      return E_INVALIDARG;
-    }
-
-    D3D11_COMMON_TEXTURE_DESC d3d11Desc;
-    d3d11Desc.Width          = metadata.Width;
-    d3d11Desc.Height         = metadata.Height;
-    d3d11Desc.Depth          = 1,
-    d3d11Desc.MipLevels      = metadata.MipLevels;
-    d3d11Desc.ArraySize      = metadata.ArraySize;
-    d3d11Desc.Format         = metadata.Format;
-    d3d11Desc.SampleDesc     = metadata.SampleDesc;
-    d3d11Desc.Usage          = metadata.Usage;
-    d3d11Desc.BindFlags      = metadata.BindFlags;
-    d3d11Desc.CPUAccessFlags = metadata.CPUAccessFlags;
-    d3d11Desc.MiscFlags      = metadata.MiscFlags;
-    d3d11Desc.TextureLayout  = metadata.TextureLayout;
-    if ((d3d11Desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) && !(d3d11Desc.MiscFlags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX))) {
-      Logger::warn("Fixing up wrong MiscFlags");
-      d3d11Desc.MiscFlags |= D3D11_RESOURCE_MISC_SHARED;
-    }
-
-    // Only 2D textures may be shared
-    try {
-      const Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &d3d11Desc, nullptr, hResource);
-      texture->QueryInterface(ReturnedInterface, ppResource);
-      return S_OK;
-    }
-    catch (const DxvkError& e) {
-      Logger::err(e.message());
-      return E_INVALIDARG;
-    }
-#else
-    Logger::warn("D3D11Device::OpenSharedResourceGeneric: Not supported on this platform.");
-    return E_INVALIDARG;
-#endif
   }
 
 

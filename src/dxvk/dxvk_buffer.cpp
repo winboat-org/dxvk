@@ -84,34 +84,6 @@ namespace dxvk {
   }
 
 
-  DxvkBuffer::DxvkBuffer(
-          DxvkDevice*           device,
-    const DxvkBufferCreateInfo& createInfo,
-          Rc<DxvkResourceAllocation>&& storage,
-          DxvkMemoryAllocator&  allocator,
-          VkMemoryPropertyFlags memFlags)
-  : DxvkPagedResource(allocator),
-    m_vkd           (device->vkd()),
-    m_properties    (memFlags),
-    m_shaderStages  (util::shaderStages(createInfo.stages)),
-    m_sharingMode   (device->getSharingMode()),
-    m_info          (createInfo),
-    m_stableAddress (true) {
-    m_allocator->registerResource(this);
-
-    // Adopt the caller's already-created, already-bound backing storage. Unlike
-    // the allocating/importing ctors we do NOT force BDA usage here: the
-    // adopted VkBuffer (a venus staging import) was created without it and is
-    // only ever used as a transfer source.
-    assignStorage(std::move(storage));
-
-    if (m_storage == nullptr) {
-      m_allocator->unregisterResource(this);
-      throw DxvkError("DxvkBuffer: adopted storage is null");
-    }
-  }
-
-
   DxvkBuffer::~DxvkBuffer() {
     m_allocator->unregisterResource(this);
   }

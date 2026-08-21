@@ -1,7 +1,5 @@
 #include <algorithm>
 
-#include "../dxvk/dxvk_helios_present_sync.h"
-
 #include "d3d11_context.h"
 #include "d3d11_context_def.h"
 #include "d3d11_context_imm.h"
@@ -1115,9 +1113,6 @@ namespace dxvk {
     D3D10DeviceLock lock = LockContext();
     SetDrawBuffers(pBufferForArgs, nullptr);
 
-    if (unlikely(m_heliosStagedSrvSeen))
-      HeliosGateStagedSrvFreshness();
-
     if (unlikely(HasDirtyGraphicsBindings()))
       ApplyDirtyGraphicsBindings();
 
@@ -1152,9 +1147,6 @@ namespace dxvk {
           UINT            AlignedByteOffsetForArgs) {
     D3D10DeviceLock lock = LockContext();
     SetDrawBuffers(pBufferForArgs, nullptr);
-
-    if (unlikely(m_heliosStagedSrvSeen))
-      HeliosGateStagedSrvFreshness();
 
     if (unlikely(HasDirtyGraphicsBindings()))
       ApplyDirtyGraphicsBindings();
@@ -1196,9 +1188,6 @@ namespace dxvk {
 
     AddCost(GpuCostEstimate::Dispatch);
 
-    if (unlikely(m_heliosStagedSrvSeen))
-      HeliosGateStagedSrvFreshness();
-
     if (unlikely(HasDirtyComputeBindings()))
       ApplyDirtyComputeBindings();
 
@@ -1219,9 +1208,6 @@ namespace dxvk {
     SetDrawBuffers(pBufferForArgs, nullptr);
 
     AddCost(GpuCostEstimate::DispatchIndirect);
-
-    if (unlikely(m_heliosStagedSrvSeen))
-      HeliosGateStagedSrvFreshness();
 
     if (unlikely(HasDirtyComputeBindings()))
       ApplyDirtyComputeBindings();
@@ -3582,71 +3568,8 @@ namespace dxvk {
 
 
   template<typename ContextType>
-  void D3D11CommonContext<ContextType>::HeliosGateStagedSrvFreshness() {
-    // Consumer freshness must track PRODUCER progress, not command-list
-    // cadence: staged imports re-stage only at list starts, and an
-    // otherwise-idle process's chunks can span many frames — the sampled
-    // copies then freeze while every fence stays green (the frozen-frame
-    // alternation, 27th session). When a bound staged SRV's producer has
-    // published past the value its staged copy holds, flush: the next
-    // list's refresh re-stages before this draw's chunk executes.
-    // Deferred contexts cannot flush; their staleness resolves at
-    // ExecuteCommandList time on the immediate context.
-    if constexpr (!IsDeferred) {
-      bool anyStaged = false;
-      bool flushNeeded = false;
-
-      for (uint32_t stage = 0; stage < 6u; stage++) {
-        const auto& bindings = m_state.srv[D3D11ShaderType(stage)];
-
-        for (uint32_t i = 0; i < bindings.maxCount; i++) {
-          auto* view = bindings.views[i].ptr();
-
-          if (!view)
-            continue;
-
-          const auto& image = view->GetHeliosStagedImage();
-
-          if (image == nullptr || image->isHeliosOrphaned())
-            continue;
-
-          anyStaged = true;
-
-          const uint32_t resid = image->info().sharing.heliosResourceId;
-
-          if (!resid)
-            continue;
-
-          uint32_t slotPid = 0u, slotFenceId = 0u;
-          uint64_t slotValue = 0u;
-
-          if (HeliosPresentSync::lookup(
-                resid, &slotPid, &slotFenceId, nullptr, &slotValue)
-           && slotValue > image->heliosLastRefreshValue()
-           && image->heliosClaimFlushForValue(slotValue))
-            flushNeeded = true;
-        }
-      }
-
-      if (!anyStaged) {
-        m_heliosStagedSrvSeen = false;
-        return;
-      }
-
-      if (flushNeeded) {
-        HeliosPresentSync::noteGateFlush();
-        static_cast<D3D11ImmediateContext*>(this)->Flush();
-      }
-    }
-  }
-
-
-  template<typename ContextType>
   void D3D11CommonContext<ContextType>::BatchDraw(
     const VkDrawIndirectCommand&            draw) {
-    if (unlikely(m_heliosStagedSrvSeen))
-      HeliosGateStagedSrvFreshness();
-
     if (unlikely(HasDirtyGraphicsBindings()))
       ApplyDirtyGraphicsBindings();
 
@@ -3672,9 +3595,6 @@ namespace dxvk {
   template<typename ContextType>
   void D3D11CommonContext<ContextType>::BatchDrawIndexed(
     const VkDrawIndexedIndirectCommand&     draw) {
-    if (unlikely(m_heliosStagedSrvSeen))
-      HeliosGateStagedSrvFreshness();
-
     if (unlikely(HasDirtyGraphicsBindings()))
       ApplyDirtyGraphicsBindings();
 
@@ -5302,7 +5222,6 @@ namespace dxvk {
     m_state.uav.mask.clear();
     m_state.uav.maxCount = 0u;
     m_state.lazy.reset();
-    m_heliosStagedSrvSeen = false;
   }
 
 
@@ -5700,13 +5619,6 @@ namespace dxvk {
         }
 
         bindings.views[slot] = resView;
-
-        // Helios: arm the per-draw staged-SRV freshness gate. One pointer
-        // test on binding changes; the gate itself disarms when a scan
-        // finds no staged views bound anymore.
-        if (unlikely(resView != nullptr
-                  && resView->GetHeliosStagedImage() != nullptr))
-          m_heliosStagedSrvSeen = true;
 
         if (!DirtyShaderResource(ShaderStage, slot, !resView))
           BindShaderResource(ShaderStage, slot, resView);

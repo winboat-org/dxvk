@@ -179,11 +179,6 @@ namespace dxvk {
       // Create the underlying image view object
       m_imageView = texture->GetImage()->createView(viewInfo);
 
-      // Helios: cache the staged-import image so the per-draw freshness
-      // gate can test bound SRVs with one pointer check instead of
-      // resolving the resource chain (null for everything non-staged).
-      if (unlikely(texture->GetImage()->isHeliosGdiStaged()))
-        m_heliosStagedImage = texture->GetImage();
     }
   }
   

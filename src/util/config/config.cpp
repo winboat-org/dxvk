@@ -20,21 +20,6 @@ namespace dxvk {
 
   const static ProfileList g_profiles = {
     /**********************************************/
-    /* HELIOS                                     */
-    /**********************************************/
-
-    /* The IddCx consumer (Looking Glass IDD inside WUDFHost): its per-
-     * acquire copy must read COMPLETE producer content — a stale read is
-     * delivered as freshly-damaged rects and sticks on the client until
-     * re-damage (the drag-trail ghosting). dwm's CS submission lag under
-     * churn exceeds 100ms, so the default 32ms bound times out exactly
-     * when it matters most; the mirror thread can afford to wait. dwm
-     * itself keeps the tight default so its CS never stalls long. */
-    { R"(\\WUDFHost\.exe$)", {{
-      { "dxvk.heliosPresentWaitUs",       "500000" },
-    }} },
-
-    /**********************************************/
     /* D3D12 GAMES (vkd3d-proton with dxvk dxgi)  */
     /**********************************************/
 

@@ -212,13 +212,6 @@ namespace dxvk::wsi {
     RECT rect = { };
     getDesktopCoordinates(hMonitor, &rect);
 
-    D3DKMT_ESCAPE escape = { };
-    escape.Type = D3DKMT_ESCAPE_SET_PRESENT_RECT_WINE;
-    escape.pPrivateDriverData = &rect;
-    escape.PrivateDriverDataSize = sizeof(rect);
-    escape.hContext = HandleToUlong(hWindow);
-    D3DKMTEscape(&escape);
-
     // Find a display mode that matches what we need
     ::GetWindowRect(hWindow, &pState->win.rect);
 
@@ -254,14 +247,6 @@ namespace dxvk::wsi {
       ::SetWindowLongW(hWindow, GWL_STYLE,   pState->win.style);
       ::SetWindowLongW(hWindow, GWL_EXSTYLE, pState->win.exstyle);
     }
-
-    RECT empty = { };
-    D3DKMT_ESCAPE escape = { };
-    escape.Type = D3DKMT_ESCAPE_SET_PRESENT_RECT_WINE;
-    escape.pPrivateDriverData = &empty;
-    escape.PrivateDriverDataSize = sizeof(empty);
-    escape.hContext = HandleToUlong(hWindow);
-    D3DKMTEscape(&escape);
 
     return true;
   }
@@ -316,13 +301,6 @@ namespace dxvk::wsi {
           bool     forceTopmost) {
     RECT bounds = { };
     wsi::getDesktopCoordinates(hMonitor, &bounds);
-
-    D3DKMT_ESCAPE escape = { };
-    escape.Type = D3DKMT_ESCAPE_SET_PRESENT_RECT_WINE;
-    escape.pPrivateDriverData = &bounds;
-    escape.PrivateDriverDataSize = sizeof(bounds);
-    escape.hContext = HandleToUlong(hWindow);
-    D3DKMTEscape(&escape);
 
     // In D3D9, changing display modes re-forces the window
     // to become top most, whereas in DXGI, it does not.

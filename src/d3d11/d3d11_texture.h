@@ -75,44 +75,12 @@ namespace dxvk {
   
   
   /**
-   * \brief Helios typed shared-surface import identity
-   *
-   * The venus resource id plus the creator's exact allocation size and
-   * memory type, as recorded by the Helios KMD's open-identity ABI and
-   * delivered through the UMD bridge. Replaces the legacy scheme of punning
-   * the resid into the shared HANDLE parameter.
-   */
-  struct D3D11_HELIOS_IMPORT_INFO {
-    uint32_t ResourceId       = 0u;
-    uint64_t AllocSize        = 0u;
-    uint32_t MemoryTypeIndex  = ~0u;
-    // When true, reconstruct the imported shared surface as the same plain
-    // LINEAR + DMA_BUF image used by the scan-out-primary exporter.
-    bool     ScanoutLinear    = false;
-    bool     LinearScanoutTarget = false;
-    // KMD-created D3DKMDT_GDISURFACE_TEXTURE: preserve the creator's
-    // OPTIMAL+DMA_BUF cross-context image contract.
-    bool     CrossContextOptimal = false;
-  };
-
-
-  /**
    * \brief Helios texture creation hints
    *
-   * Out-of-band creation flags the d3d10umddi frontend threads into DXVK for
-   * surfaces the D3D11 desc alone cannot describe.
+   * Carries the exact package-owned outer allocation association that the
+   * public D3D11 descriptor cannot express.
    */
   struct D3D11_HELIOS_CREATE_INFO {
-    // The DWM scan-out primary: preserve normal OPTIMAL render-target
-    // semantics and export its allocation as a DMA_BUF.
-    bool DirectOptimalScanout = false;
-    // The exported OPTIMAL image will be imported by the KMD's transfer queue,
-    // whose copy commands consume it in GENERAL. Select GENERAL as the
-    // canonical layout at creation so both Vulkan instances use one exact
-    // external-memory layout contract.
-    bool KmdTransferSource = false;
-    // Package-owned immutable association for the exact outer WDDM
-    // allocation. The record is copied into the DxvkImage object.
     const HeliosResourceAssociationV1* ResourceAssociation = nullptr;
   };
 
@@ -139,7 +107,6 @@ namespace dxvk {
             DXGI_USAGE                  DxgiUsage,
             VkImage                     vkImage,
             HANDLE                      hSharedHandle,
-      const D3D11_HELIOS_IMPORT_INFO*   pHeliosImport = nullptr,
       const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate = nullptr);
     
     ~D3D11CommonTexture();
@@ -655,8 +622,6 @@ namespace dxvk {
       const DxvkImageCreateInfo*  pImageInfo,
       const VkImageSubresource&   subresource) const;
 
-    void ExportImageInfo();
-
     static BOOL IsR32UavCompatibleFormat(
             DXGI_FORMAT           Format);
 
@@ -854,7 +819,6 @@ namespace dxvk {
       const D3D11_COMMON_TEXTURE_DESC*  pDesc,
       const D3D11_ON_12_RESOURCE_INFO*  p11on12Info,
             HANDLE                      hSharedHandle,
-      const D3D11_HELIOS_IMPORT_INFO*   pHeliosImport = nullptr,
       const D3D11_HELIOS_CREATE_INFO*   pHeliosCreate = nullptr);
 
     D3D11Texture2D(

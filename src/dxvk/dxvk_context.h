@@ -1550,10 +1550,6 @@ namespace dxvk {
 
   private:
 
-    // The D3D11 immediate context records the ordered snapshot copy and is the
-    // only layer allowed to pre-arm that command list's exact reader wait.
-    friend class D3D11ImmediateContext;
-
     Rc<DxvkDevice>          m_device;
     DxvkObjects*            m_common;
 
@@ -1724,144 +1720,6 @@ namespace dxvk {
      * next submission start). See releaseSharedImagesToExternal(). */
     std::vector<Rc<DxvkImage>> m_sharedImagesTouched;
     std::vector<Rc<DxvkImage>> m_sharedImagesReleased;
-
-    /* Helios GDI staging: staged shared images sampled in the current command
-     * list enroll into "touched"; end-of-list merges them into the PERSISTENT
-     * refresh set, which is copied (source -> private image) at EVERY list
-     * start until the surface goes idle. Persistence is load-bearing: with the
-     * old touch->refresh-next-list-only model, any surface whose content
-     * changed once and was then re-read exactly once (wallpaper, sidebars,
-     * icons — one-shot draws) sampled the PRE-change bytes forever, and
-     * dropped arms caused multi-second stale ghosts in the IDD capture. */
-    struct HeliosStagedEntry {
-      Rc<DxvkImage> image;
-      uint32_t      idleTicks = 0u;
-    };
-    std::vector<Rc<DxvkImage>>     m_heliosStagedTouched;
-    std::vector<HeliosStagedEntry> m_heliosStagedRefresh;
-
-    /* Helios STEP-0 present-vs-absent probe (diagnostic, one-shot per staged
-     * image): a GPU copy of the imported venus staging buffer into a
-     * host-visible readback buffer, harvested (mapped + byte-analyzed + logged)
-     * a fixed number of refresh cycles after the copy was recorded, by which
-     * time the submission has long since executed. Answers whether the shared
-     * blob dwm imports actually contains the creator's bytes (nonzero) or is
-     * empty (zero -> the creator's render never reaches the shared blob). */
-    struct HeliosStagedProbe {
-      Rc<DxvkImage>  image;
-      Rc<DxvkBuffer> buffer;
-      VkDeviceSize   size      = 0u;
-      uint32_t       countdown = 0u;
-      uint32_t       issueTick = 0u;
-      const char*    mode      = "";
-    };
-    std::vector<HeliosStagedProbe>            m_heliosStagedProbes;
-    // Keyed by venus res_id (unique per session), NOT image pointer — image
-    // pointers are recycled by the allocator, which would carry a stale tick
-    // count onto a fresh surface.
-    std::unordered_map<uint32_t, uint32_t>    m_heliosStagedProbeTicks;
-    uint32_t                                  m_heliosStagedProbesIssued = 0u;
-
-    /* Helios WS1 #4 consumer-side present wait (dxvk.heliosPresentWaitUs).
-     * The exact producer generation is (pid, process creation time, fence id).
-     * HPS2 persists across boots, and pid plus the per-DLL fence counter both
-     * repeat; omitting creation time caused DWM to import its new fence for an
-     * old slot and wait forever on an unreachable value. */
-    struct HeliosPresentFenceKey {
-      uint32_t pid = 0u;
-      uint32_t fenceId = 0u;
-      uint64_t producerStart = 0u;
-
-      bool operator == (const HeliosPresentFenceKey& other) const {
-        return pid == other.pid
-            && fenceId == other.fenceId
-            && producerStart == other.producerStart;
-      }
-    };
-
-    struct HeliosPresentFenceKeyHash {
-      size_t operator () (const HeliosPresentFenceKey& key) const {
-        const uint64_t pidFence = (uint64_t(key.pid) << 32) | key.fenceId;
-        const size_t h1 = std::hash<uint64_t>()(key.producerStart);
-        const size_t h2 = std::hash<uint64_t>()(pidFence);
-        return h1 ^ (h2 + size_t(0x9e3779b9u) + (h1 << 6) + (h1 >> 2));
-      }
-    };
-
-    struct HeliosPresentWaitFence {
-      Rc<DxvkFence> fence;
-      uint32_t      retryCountdown = 0u;
-    };
-    std::unordered_map<HeliosPresentFenceKey, HeliosPresentWaitFence,
-      HeliosPresentFenceKeyHash> m_heliosPresentWaitFences;
-
-    /* Helios cross-process present ordering, CONSUMER side. Venus resource ids
-     * of imported surfaces this command list samples, deduplicated; drained at
-     * flush into GPU-side timeline waits on the producers' named present
-     * fences. The whole point is that neither side blocks a CPU thread: the
-     * producer records a signal at its frame's GPU completion and publishes the
-     * value, and this turns that into a wait the GPU resolves. The alternative
-     * this replaces -- the producer CPU-blocking on its own GPU completion
-     * before publishing the present -- cost Fire Strike GT1 158 -> 136 fps and
-     * Combined 25.9 -> 18.8 fps, because it removed all CPU/GPU overlap. */
-    std::vector<uint32_t>                     m_heliosImportedReads;
-    /* Last value already waited for per exact producer generation. A timeline
-     * wait on an already-reached value is nearly free, but skipping it keeps
-     * the submission's wait list short when dwm composes many windows fed by
-     * one producer. */
-    std::unordered_map<HeliosPresentFenceKey, uint64_t,
-      HeliosPresentFenceKeyHash> m_heliosImportedWaited;
-    uint64_t                                  m_heliosImportedWaitsEmitted = 0u;
-
-    /* Helios D4a scanout-read acquire, consumer side: last ledger `issued`
-     * this submission chain armed per venus resid. Same argument as
-     * m_heliosImportedWaited — an earlier submission on this queue waiting
-     * >= issued queue-orders every later one, so re-arming would only pad
-     * the wait list. Plus the census counters §7.1's predictions score
-     * (armed/(armed+skipped) is the conditional-wait rate; residMiss and
-     * ledgerMiss split "armed ~= 0" into identity-path vs no-slot causes). */
-    // Generation is globally unique across KMD transport resets, so a recycled
-    // slot or same-resid re-claim cannot inherit a prior GPU-side wait.
-    std::unordered_map<uint64_t, uint64_t>    m_heliosScanoutWaited;
-    // A resolved reservation is keyed by the exact ledger generation. A missing
-    // pre-Present slot has no generation yet; its one-list resid marker only
-    // suppresses the exact current WindowedBlt reservation that will mint it.
-    std::unordered_map<uint64_t, uint64_t>    m_heliosScanoutPrearmed;
-    std::unordered_map<uint32_t, uint64_t>    m_heliosScanoutPrearmedUnclaimed;
-    uint64_t                                  m_heliosScanoutPrearmGeneration = 1u;
-    uint64_t                                  m_heliosScanoutFlushes    = 0u;
-    uint64_t                                  m_heliosScanoutArmed      = 0u;
-    uint64_t                                  m_heliosScanoutSkipped    = 0u;
-    uint64_t                                  m_heliosScanoutLedgerMiss = 0u;
-    uint64_t                                  m_heliosScanoutResidMiss  = 0u;
-    /* Sampled imported surfaces with NO publish slot: an UNORDERED read, i.e.
-     * exactly the defect this mechanism exists to close. Must fall to zero for
-     * app windows once the producer side is wired; a nonzero steady state names
-     * a producer that is not publishing. */
-    uint64_t                                  m_heliosImportedNoSlot       = 0u;
-    /* Sampled SHARED images by sharing mode, and how many Import-mode ones
-     * carried no venus resource id. Without this, "no waits were emitted" has
-     * three indistinguishable causes: the seam is not reached, the consumer
-     * samples nothing shared, or it samples shared images that are not
-     * Import-mode. Cheap (one increment per already-rare branch) and it is the
-     * only way to tell those apart on a live desktop. */
-    uint64_t                                  m_heliosSampledImport        = 0u;
-    uint64_t                                  m_heliosSampledExport        = 0u;
-    uint64_t                                  m_heliosSampledNoResid       = 0u;
-    uint64_t                                  m_heliosFlushes              = 0u;
-    uint64_t                                  m_heliosPresentWaits        = 0u;
-    uint64_t                                  m_heliosPresentWaitUsTotal  = 0u;
-    uint64_t                                  m_heliosPresentWaitTimeouts = 0u;
-    /* imported-source reads that found NO publish slot (unordered read —
-     * the silent path that hid the drag-trail root cause) and reads whose
-     * target value had already retired (no wait needed) */
-    uint64_t                                  m_heliosPresentWaitNoSlot   = 0u;
-    uint64_t                                  m_heliosPresentWaitFast     = 0u;
-    /* staged re-stages skipped because the newest published value is
-     * kwait-ordered and not yet retired (the consumer cannot be sampling
-     * that image yet — its flip is kernel-held; blocking here was dwm's
-     * 9 ms windowed-game composition stall, 28th session) */
-    uint64_t                                  m_heliosRefreshSkips        = 0u;
 
     DxvkDescriptorCopyWorker m_descriptorWorker;
 
@@ -2431,33 +2289,6 @@ namespace dxvk {
     void trackSharedImageTouched(
             DxvkImage&                image);
 
-    void trackHeliosStagedImage(
-            DxvkImage&                image);
-
-    void refreshHeliosStagedImages();
-
-    void heliosPresentWaitBeforeRefresh(
-      const Rc<DxvkImage>&      image);
-
-    void heliosNoteSampledShared(
-            DxvkImage*          image);
-
-    void heliosEmitImportedWaits();
-
-    void heliosEmitScanoutReuseWaits();
-
-    void heliosPrearmScanoutReuseWait(
-            uint32_t            resid,
-            uint64_t            generation,
-            uint64_t            issued,
-            uint64_t            retired,
-      const Rc<DxvkFence>&       fence);
-
-    DxvkFence* heliosProducerFence(
-            uint32_t            pid,
-            uint64_t            producerStart,
-            uint32_t            fenceId);
-
     void releaseSharedImagesToExternal();
 
     void acquireSharedImagesFromExternal();
@@ -2780,16 +2611,6 @@ namespace dxvk {
         ? DxvkAccess::Write : DxvkAccess::Read;
       m_cmd->track(view.image(), access);
 
-      // Helios cross-process present ordering. This is the seam because it is
-      // the one funnel every SAMPLED bound image passes through, on BOTH
-      // binding models (updateDescriptorSetsBindings and
-      // updateDescriptorHeapBindings), and it is re-run per command list, so a
-      // binding dwm leaves in place across frames is still seen. The copy-time
-      // wait in heliosPresentWaitBeforeRefresh does NOT cover this: dwm
-      // composes an app window by sampling the shared surface, never by
-      // copying it, which is why that path had not logged a single line.
-      if (unlikely(view.image()->info().sharing.mode != DxvkSharedHandleMode::None))
-        heliosNoteSampledShared(view.image());
     }
 
     bool formatsAreImageCopyCompatible(

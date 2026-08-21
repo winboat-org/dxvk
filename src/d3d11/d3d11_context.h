@@ -1068,11 +1068,6 @@ namespace dxvk {
 
     uint64_t                    m_estimatedCost = 0u;
 
-    // Helios: sticky "a staged-import SRV has been bound on this context"
-    // flag — the per-draw freshness gate is a single branch until the first
-    // staged bind, and clears itself when a scan finds none bound.
-    bool                        m_heliosStagedSrvSeen = false;
-
     // Helios: CS-stream tail state for reset-sweep elision. Both immediate
     // and deferred contexts record command-list boundaries, so each tracks
     // the tail of its own stream independently. When the tail is
@@ -1311,8 +1306,6 @@ namespace dxvk {
     bool HasDirtyComputeBindings();
 
     bool HasDirtyGraphicsBindings();
-
-    void HeliosGateStagedSrvFreshness();
 
     void ResetCommandListState(
       D3D11CommandListResetMode Mode = D3D11CommandListResetMode::Physical);

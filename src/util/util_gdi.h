@@ -173,35 +173,6 @@ namespace dxvk {
       D3DKMT_HANDLE hSyncObject;
   } D3DKMT_DESTROYSYNCHRONIZATIONOBJECT;
 
-  typedef enum _D3DKMT_ESCAPETYPE
-  {
-      D3DKMT_ESCAPE_UPDATE_RESOURCE_WINE = 0x80000000,
-      D3DKMT_ESCAPE_SET_PRESENT_RECT_WINE = 0x80000001,
-  } D3DKMT_ESCAPETYPE;
-
-  typedef struct _D3DDDI_ESCAPEFLAGS
-  {
-      union
-      {
-          struct
-          {
-              UINT HardwareAccess :1;
-              UINT Reserved       :31;
-          };
-          UINT Value;
-      };
-  } D3DDDI_ESCAPEFLAGS;
-
-  typedef struct _D3DKMT_ESCAPE
-  {
-      D3DKMT_HANDLE      hAdapter;
-      D3DKMT_HANDLE      hDevice;
-      D3DKMT_ESCAPETYPE  Type;
-      D3DDDI_ESCAPEFLAGS Flags;
-      void              *pPrivateDriverData;
-      UINT               PrivateDriverDataSize;
-      D3DKMT_HANDLE      hContext;
-  } D3DKMT_ESCAPE;
 
   typedef struct _D3DKMT_OPENADAPTERFROMLUID
   {
@@ -513,7 +484,6 @@ namespace dxvk {
   EXTERN_C WINBASEAPI NTSTATUS WINAPI D3DKMTDestroyDevice(const D3DKMT_DESTROYDEVICE *desc);
   EXTERN_C WINBASEAPI NTSTATUS WINAPI D3DKMTDestroyKeyedMutex(const D3DKMT_DESTROYKEYEDMUTEX *desc);
   EXTERN_C WINBASEAPI NTSTATUS WINAPI D3DKMTDestroySynchronizationObject(const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT *desc);
-  EXTERN_C WINBASEAPI NTSTATUS WINAPI D3DKMTEscape(const D3DKMT_ESCAPE *desc);
   EXTERN_C WINBASEAPI NTSTATUS WINAPI D3DKMTOpenAdapterFromLuid(D3DKMT_OPENADAPTERFROMLUID *desc);
   EXTERN_C WINBASEAPI NTSTATUS WINAPI D3DKMTOpenKeyedMutex(D3DKMT_OPENKEYEDMUTEX *desc);
   EXTERN_C WINBASEAPI NTSTATUS WINAPI D3DKMTOpenKeyedMutex2(D3DKMT_OPENKEYEDMUTEX2 *desc);

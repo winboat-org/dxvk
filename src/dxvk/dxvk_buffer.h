@@ -159,22 +159,6 @@ namespace dxvk {
             DxvkMemoryAllocator&  memAlloc,
             VkMemoryPropertyFlags memFlags);
 
-    /**
-     * \brief Adopts a pre-built backing allocation
-     *
-     * Helios GDI staging: wraps an already-created+bound allocation (e.g. the
-     * venus host-visible staging buffer from \ref
-     * DxvkMemoryAllocator::importVenusStagingBuffer) in a \c DxvkBuffer so it
-     * can be used with the context's \c copyBufferToImage machinery. Throws
-     * \c DxvkError if the storage is null.
-     */
-    DxvkBuffer(
-            DxvkDevice*           device,
-      const DxvkBufferCreateInfo& createInfo,
-            Rc<DxvkResourceAllocation>&& storage,
-            DxvkMemoryAllocator&  memAlloc,
-            VkMemoryPropertyFlags memFlags);
-
     ~DxvkBuffer();
     
     /**

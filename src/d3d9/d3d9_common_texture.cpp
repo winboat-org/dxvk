@@ -3,7 +3,6 @@
 #include "d3d9_util.h"
 #include "d3d9_device.h"
 
-#include "../util/util_shared_res.h"
 #include "../util/util_win32_compat.h"
 
 #include <algorithm>
@@ -69,10 +68,8 @@ namespace dxvk {
           "\n  Pool:    0x", std::hex, m_desc.Pool, std::dec));
       }
 
-      if (pSharedHandle && *pSharedHandle == nullptr) {
+      if (pSharedHandle && *pSharedHandle == nullptr)
         *pSharedHandle = m_image->sharedHandle();
-        ExportImageInfo();
-      }
 
       if ((m_image->info().usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0)
         CreateSampleView(0);
@@ -413,7 +410,6 @@ namespace dxvk {
         : DxvkSharedHandleMode::Import;
       imageInfo.sharing.handle = *pSharedHandle;
       imageInfo.shared = true;
-      // TODO: validate metadata?
     }
 
     if (m_mapping.ConversionFormatInfo.FormatType != D3D9ConversionFormat_None) {
@@ -610,97 +606,6 @@ namespace dxvk {
 
     return D3D9_COMMON_TEXTURE_MAP_MODE_BACKED;
   }
-
-  void D3D9CommonTexture::ExportImageInfo() {
-    /* From MSDN:
-      Textures being shared from D3D9 to D3D11 have the following restrictions.
-
-      - Textures must be 2D
-      - Only 1 mip level is allowed
-      - Texture must have default usage
-      - Texture must be write only
-      - MSAA textures are not allowed
-      - Bind flags must have SHADER_RESOURCE and RENDER_TARGET set
-      - Only R10G10B10A2_UNORM, R16G16B16A16_FLOAT and R8G8B8A8_UNORM formats are allowed
-    */
-    DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
-
-    switch (m_desc.Format) {
-      case D3D9Format::A2B10G10R10: dxgiFormat = DXGI_FORMAT_R10G10B10A2_UNORM; break;
-      case D3D9Format::A16B16G16R16F: dxgiFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
-      case D3D9Format::A8B8G8R8: dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break;
-      case D3D9Format::X8B8G8R8: dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break; /* No RGBX in DXGI */
-      case D3D9Format::A8R8G8B8: dxgiFormat = DXGI_FORMAT_B8G8R8A8_UNORM; break;
-      case D3D9Format::X8R8G8B8: dxgiFormat = DXGI_FORMAT_B8G8R8X8_UNORM; break;
-      default:
-        Logger::warn(str::format("D3D9: Unsupported format for shared textures: ", m_desc.Format));
-        return;
-    }
-
-    struct d3dkmt_d3d9_desc desc = { };
-    desc.dxgi.size = sizeof(desc);
-    desc.dxgi.version = 1;
-    desc.dxgi.width = m_desc.Width;
-    desc.dxgi.height = m_desc.Height;
-    desc.dxgi.format = dxgiFormat;
-    desc.dxgi.unknown_0 = 1;
-    desc.format = static_cast<D3DFORMAT>(m_desc.Format);
-    desc.type = m_type;
-    desc.usage = m_desc.Usage | 0x8000000;
-
-    switch (m_type) {
-      case D3DRTYPE_TEXTURE:
-        desc.texture.width = m_desc.Width;
-        desc.texture.height = m_desc.Height;
-        desc.texture.levels = m_desc.MipLevels;
-        break;
-      case D3DRTYPE_SURFACE:
-        desc.surface.width = m_desc.Width;
-        desc.surface.height = m_desc.Height;
-        break;
-      default:
-        Logger::warn(str::format("D3D9: Unsupported type for shared textures:", m_type));
-        break;
-    }
-
-    D3DKMT_ESCAPE escape = { };
-    escape.Type = D3DKMT_ESCAPE_UPDATE_RESOURCE_WINE;
-    escape.pPrivateDriverData = &desc;
-    escape.PrivateDriverDataSize = sizeof(desc);
-    escape.hContext = m_image->storage()->kmtLocal();
-
-    if (!D3DKMTEscape(&escape))
-      return;
-
-    /* try the legacy Proton shared resource implementation */
-
-    if (m_desc.Depth == 1 && m_desc.MipLevels == 1 && m_desc.MultiSample == D3DMULTISAMPLE_NONE &&
-        m_desc.Usage & D3DUSAGE_RENDERTARGET && dxgiFormat != DXGI_FORMAT_UNKNOWN) {
-      HANDLE ntHandle = openKmtHandle(m_image->sharedHandle());
-
-      DxvkSharedTextureMetadata metadata;
-
-      metadata.Width              = m_desc.Width;
-      metadata.Height             = m_desc.Height;
-      metadata.MipLevels          = m_desc.MipLevels;
-      metadata.ArraySize          = m_desc.ArraySize;
-      metadata.Format             = dxgiFormat;
-      metadata.SampleDesc.Count   = 1;
-      metadata.SampleDesc.Quality = 0;
-      metadata.Usage              = D3D11_USAGE_DEFAULT;
-      metadata.BindFlags          = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-      metadata.CPUAccessFlags     = 0;
-      metadata.MiscFlags          = D3D11_RESOURCE_MISC_SHARED;
-      metadata.TextureLayout      = D3D11_TEXTURE_LAYOUT_UNDEFINED;
-
-      if (ntHandle == INVALID_HANDLE_VALUE || !setSharedMetadata(ntHandle, &metadata, sizeof(metadata)))
-        Logger::warn("D3D9: Failed to write shared resource info for a texture");
-
-      if (ntHandle != INVALID_HANDLE_VALUE)
-        ::CloseHandle(ntHandle);
-    }
-  }
-
 
   Rc<DxvkImageView> D3D9CommonTexture::CreateView(
           UINT                   Layer,

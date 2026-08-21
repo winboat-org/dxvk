@@ -8,7 +8,6 @@
 #include "dxvk_fence.h"
 #include "dxvk_framebuffer.h"
 #include "dxvk_hang.h"
-#include "dxvk_helios_scanout_acquire.h"
 #include "dxvk_image.h"
 #include "dxvk_instance.h"
 #include "dxvk_latency.h"
@@ -188,18 +187,6 @@ namespace dxvk {
       return m_options;
     }
 
-    /**
-     * \brief Helios D4a scanout-read acquire state
-     *
-     * The per-device gate fences + signaler thread that order a scan-out
-     * buffer's re-write after every in-flight host readback of it. The
-     * context's flush path arms waits through it; ~DxvkDevice shuts it
-     * down before waitForIdle.
-     */
-    DxvkHeliosScanoutAcquire& heliosScanoutAcquire() {
-      return m_heliosScanoutAcquire;
-    }
-    
     /**
      * \brief Queue handles
      * 
@@ -866,8 +853,6 @@ namespace dxvk {
     DxvkRecycler<DxvkCommandList, 16> m_recycledCommandLists;
 
     DxvkSubmissionQueue         m_submissionQueue;
-
-    DxvkHeliosScanoutAcquire    m_heliosScanoutAcquire;
 
     Rc<DxvkShaderCache>         m_shaderCache;
 

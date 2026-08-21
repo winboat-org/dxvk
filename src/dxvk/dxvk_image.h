@@ -76,31 +76,6 @@ namespace dxvk {
     // Shared handle info
     DxvkSharedHandleInfo sharing = { };
 
-    // Helios: this image is an internal direct-bind alias of an imported venus
-    // resource, created as the transfer-read source for a staged shared image.
-    // Skips the staging/magenta gates so the import binds the venus memory
-    // directly (recursion guard).
-    VkBool32 heliosDirectImportAlias = VK_FALSE;
-
-    // Helios: this image is the exact DWM scan-out primary. It is a plain
-    // LINEAR + DMA_BUF image; ordinary shared images remain OPTIMAL + OPAQUE_FD.
-    VkBool32 heliosScanoutPrimary = VK_FALSE;
-
-    // Windows designated this image as a VidPn primary. Keep ordinary OPTIMAL
-    // tiling for DWM rendering, but export dedicated DMA_BUF storage so the
-    // host can scan out the same backing allocation directly.
-    VkBool32 heliosDirectOptimalScanout = VK_FALSE;
-
-    // KMD-created D3DKMDT_GDISURFACE_TEXTURE. The image is an OPTIMAL,
-    // DMA_BUF-backed cross-context allocation and must be imported directly,
-    // never reinterpreted as a pitched GDI staging buffer.
-    VkBool32 heliosCrossContextOptimal = VK_FALSE;
-
-    // Helios: direct import of the KMD-owned plain-LINEAR VidPn primary. This
-    // is a transfer destination, not a sampled GDI surface: keep its LINEAR
-    // image bound directly to the imported resource and bypass staging.
-    VkBool32 heliosLinearScanoutTarget = VK_FALSE;
-
     // Debug name
     const char* debugName = nullptr;
 
@@ -890,129 +865,6 @@ namespace dxvk {
       return m_debugName.c_str();
     }
 
-    /**
-     * \brief Whether this is a Helios GDI-staged shared image
-     *
-     * When true, the image is a private device-local sampled surface refreshed
-     * each frame from \ref heliosStagingBuffer via a pitch-correct
-     * \c vkCmdCopyBufferToImage, rather than binding the creator's host-visible
-     * memory directly (which cannot reconcile the executor's fixed row pitch
-     * with a driver-chosen linear-image pitch).
-     */
-    bool isHeliosGdiStaged() const {
-      return m_heliosGdiStaged;
-    }
-
-    /**
-     * \brief Row-pitch byte alignment of the staged surface's source blob
-     *
-     * The host-visible GDI executor writes at round_up(width*4,256); device-local
-     * venus blobs are stored TIGHT (width*4). The per-frame copyBufferToImage must
-     * use the matching alignment or the read shears / overruns the buffer.
-     */
-    uint32_t heliosStagedRowAlign() const {
-      return m_heliosStagedRowAlign;
-    }
-
-    /**
-     * \brief Backing venus host-visible staging buffer, if GDI-staged
-     * \returns The staging buffer, or null
-     */
-    const Rc<DxvkBuffer>& heliosStagingBuffer() const {
-      return m_heliosStagingBuffer;
-    }
-
-    /**
-     * \brief Direct-bind alias image of the imported venus resource
-     *
-     * Device-local staging v2: the shared blob holds the host driver's OPTIMAL
-     * (tiled) layout, so no linear buffer copy at any pitch can decode it. The
-     * alias image binds the imported memory directly with the creator's
-     * create-info; the per-frame refresh does vkCmdCopyImage(alias -> private
-     * sampled image), which reads through the tiling correctly.
-     * \returns The alias image, or null (buffer-staged or unstaged)
-     */
-    const Rc<DxvkImage>& heliosStagingImage() const {
-      return m_heliosStagingImage;
-    }
-
-    /**
-     * \brief Whether this is a Helios debug-magenta private image
-     *
-     * Localization diagnostic (HELIOS_DEBUG_MAGENTA): a device-local shared
-     * import replaced by a private device-local image cleared to solid magenta.
-     */
-    bool isHeliosDebugMagenta() const {
-      return m_heliosDebugMagenta;
-    }
-
-    /**
-     * \brief Producer present-sync value observed by the last staged refresh
-     *
-     * Stamped by refreshHeliosStagedImages when it re-stages this image; read
-     * at SRV-bind time to decide whether the producer has published a newer
-     * frame than the staged copy holds (bind-time staleness gate — consumer
-     * freshness must track producer progress, not command-list cadence).
-     */
-    uint64_t heliosLastRefreshValue() const {
-      return m_heliosLastRefreshValue.load(std::memory_order_acquire);
-    }
-
-    void setHeliosLastRefreshValue(uint64_t value) {
-      m_heliosLastRefreshValue.store(value, std::memory_order_release);
-    }
-
-    /**
-     * \brief Rate limit for the bind-time staleness gate
-     *
-     * The refresh stamp is written on the CS thread when the re-stage
-     * executes, so between the gate's flush and that execution the image
-     * still reads stale; recording the value a flush was already issued
-     * for bounds the gate to one flush per published producer value.
-     * \returns true if this call claimed the flush for \c value
-     */
-    bool heliosClaimFlushForValue(uint64_t value) {
-      uint64_t prev = m_heliosFlushRequestedValue.load(std::memory_order_relaxed);
-      while (prev < value) {
-        if (m_heliosFlushRequestedValue.compare_exchange_weak(prev, value,
-            std::memory_order_acq_rel, std::memory_order_relaxed))
-          return true;
-      }
-      return false;
-    }
-
-    /**
-     * \brief Re-arms the staleness gate after a skipped re-stage
-     *
-     * A refresh that SKIPS an unretired kwait-ordered value leaves the
-     * staged copy behind that value; releasing the claim lets a later
-     * bind flush again for the same value, so the retry converges even
-     * when no newer publish ever arrives. No-op if a newer value has
-     * been claimed meanwhile.
-     */
-    void heliosReleaseFlushClaim(uint64_t value) {
-      uint64_t expected = value;
-      m_heliosFlushRequestedValue.compare_exchange_strong(expected, value - 1u,
-        std::memory_order_acq_rel, std::memory_order_relaxed);
-    }
-
-    /**
-     * \brief Whether the D3D11 resource owning this staged image was destroyed
-     *
-     * The staged-refresh set holds an Rc on enrolled images; without this flag
-     * a dead producer's imports would be zombie-refreshed (full-image copy +
-     * failed slot lookup per command list) until the idle prune, keeping the
-     * venus resources alive as well. Set by the texture destructor; the
-     * refresh loop erases flagged entries.
-     */
-    bool isHeliosOrphaned() const {
-      return m_heliosOrphaned.load(std::memory_order_acquire);
-    }
-
-    void setHeliosOrphaned() {
-      m_heliosOrphaned.store(true, std::memory_order_release);
-    }
-
   private:
 
     Rc<vk::DeviceFn>            m_vkd;
@@ -1024,33 +876,6 @@ namespace dxvk {
     uint32_t                    m_version     = 0u;
     bool                        m_shared      = false;
     bool                        m_stableAddress = false;
-
-    // Helios GDI staging (approach A): when set, this image is a private
-    // device-local sampled surface and m_heliosStagingBuffer holds the
-    // creator's host-visible venus bytes to be copied in per frame.
-    bool                        m_heliosGdiStaged = false;
-    Rc<DxvkBuffer>              m_heliosStagingBuffer = nullptr;
-    // Device-local staging v2: direct-bind alias image of the imported venus
-    // resource; per-frame vkCmdCopyImage(alias -> private image) detiles the
-    // creator's OPTIMAL layout (a linear buffer copy cannot).
-    Rc<DxvkImage>               m_heliosStagingImage = nullptr;
-    // Device pointer for constructing the internal alias image during
-    // allocateStorageWithUsage (only Helios uses this).
-    DxvkDevice*                 m_heliosDevice = nullptr;
-    // Source-blob row-pitch alignment: 256 for the host-visible GDI executor,
-    // element-size (tight) for device-local venus blobs.
-    uint32_t                    m_heliosStagedRowAlign = 256u;
-
-    // Helios localization diagnostic: private device-local image cleared to
-    // magenta in place of a device-local cross-process shared import.
-    bool                        m_heliosDebugMagenta = false;
-
-    // Present-sync value the last staged refresh observed (bind-time gate),
-    // the highest value a gate flush was already issued for (rate limit),
-    // and the owning-resource-destroyed flag (zombie-refresh unenroll).
-    std::atomic<uint64_t>       m_heliosLastRefreshValue = { 0u };
-    std::atomic<uint64_t>       m_heliosFlushRequestedValue = { 0u };
-    std::atomic<bool>           m_heliosOrphaned = { false };
 
     bool                        m_unifiedLayoutEnabled = false;
     bool                        m_unifiedLayoutAvailable = false;

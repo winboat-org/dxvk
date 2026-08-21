@@ -7,7 +7,6 @@ util_src = files([
   'util_gdi.cpp',
   'util_luid.cpp',
   'util_matrix.cpp',
-  'util_shared_res.cpp',
   'util_sleep.cpp',
   'util_unmap.cpp',
 

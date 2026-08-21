@@ -498,16 +498,6 @@ namespace dxvk {
       return m_initializer->InitShaderIcb(pShader, IcbSize, pIcbData);
     }
 
-    void InitializeStagedTexture(
-            D3D11CommonTexture*         pTexture) {
-      m_initializer->InitHeliosStagedTexture(pTexture);
-    }
-
-    void InitializeMagentaTexture(
-            D3D11CommonTexture*         pTexture) {
-      m_initializer->InitHeliosMagentaTexture(pTexture);
-    }
-
     VkPipelineStageFlags GetEnabledShaderStages() const {
       return m_dxvkDevice->getShaderPipelineStages();
     }
@@ -680,12 +670,6 @@ namespace dxvk {
             VkFormat                Format,
             VkImageType             Type,
             VkImageCreateFlags      Flags) const;
-
-    template<bool IsKmtHandle>
-    HRESULT OpenSharedResourceGeneric(
-            HANDLE      hResource,
-            REFIID      ReturnedInterface,
-            void**      ppResource);
 
     uint32_t GetViewPlaneIndex(
             ID3D11Resource*         pResource,
