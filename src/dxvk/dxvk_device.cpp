@@ -120,14 +120,34 @@ namespace dxvk {
   }
 
 
+  VkMemoryRequirements DxvkDevice::queryBufferMemoryRequirements(
+    const DxvkBufferCreateInfo&       createInfo) const {
+    VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    info.flags = createInfo.flags;
+    info.usage = createInfo.usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    info.size  = createInfo.size;
+    getSharingMode().fill(info);
+
+    VkDeviceBufferMemoryRequirements query = { VK_STRUCTURE_TYPE_DEVICE_BUFFER_MEMORY_REQUIREMENTS };
+    query.pCreateInfo = &info;
+
+    VkMemoryRequirements2 requirements = { VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
+    m_vkd->vkGetDeviceBufferMemoryRequirements(m_vkd->device(), &query, &requirements);
+    return requirements.memoryRequirements;
+  }
+
+
   VkResult DxvkDevice::createHeliosOuterAllocation(
           VkDeviceSize                  bytes,
           VkMemoryPropertyFlags        memoryProperties,
           HeliosResourceAssociationV1* association) const {
     if (!m_instance->isRecordOnlyDirect())
       return VK_ERROR_FEATURE_NOT_PRESENT;
-    if (!bytes || !association || !m_heliosOuterOps)
+    if (!bytes || !association || !m_heliosOuterOps) {
+      Logger::err(str::format("Helios outer allocation refused: ops=",
+        bool(m_heliosOuterOps), " bytes=", bytes));
       return VK_ERROR_DEVICE_LOST;
+    }
 
     *association = { };
     VkResult result = m_heliosOuterOps.allocate(
@@ -138,6 +158,17 @@ namespace dxvk {
       association);
     if (result != VK_SUCCESS
      || !validateHeliosOuterAssociation(*association, bytes, memoryProperties)) {
+      Logger::err(str::format("Helios outer allocation refused: result=", result,
+        " bytes=", bytes, " props=0x", std::hex, memoryProperties, std::dec,
+        " token=", association->outer_allocation_token,
+        " generation=", association->device_generation,
+        " assocBytes=", association->outer_allocation_bytes,
+        " flags=0x", std::hex, association->association_flags,
+        " sType=0x", uint32_t(association->s_type),
+        " structBytes=", std::dec, association->struct_bytes,
+        " abi=", association->abi_version,
+        " pkgGen=0x", std::hex, association->package_generation, std::dec,
+        " cpuMap=", association->cpu_mapping ? 1 : 0));
       const uint64_t deviceGeneration = association->device_generation;
       const uint64_t outerAllocationToken = association->outer_allocation_token;
       if (result == VK_SUCCESS && deviceGeneration && outerAllocationToken) {
@@ -165,22 +196,31 @@ namespace dxvk {
       & HELIOS_RESOURCE_ASSOCIATION_FLAG_CPU_MAPPING) != 0;
     const uintptr_t cpuMapping = reinterpret_cast<uintptr_t>(association.cpu_mapping);
 
-    return bytes
-     && association.s_type == HELIOS_RESOURCE_ASSOCIATION_STRUCTURE_TYPE
-     && association.struct_bytes == HELIOS_RESOURCE_ASSOCIATION_BYTES
-     && association.abi_version == HELIOS_RESOURCE_ASSOCIATION_ABI_VERSION
-     && !association.reserved
-     && association.package_generation == HELIOS_PACKAGE_GENERATION
-     && association.device_generation
-     && association.outer_allocation_token
-     && association.outer_allocation_bytes >= bytes
-     && !(association.association_flags & ~HELIOS_RESOURCE_ASSOCIATION_FLAG_MASK)
-     && !association.reserved1
-     && (!!association.cpu_mapping == hasCpuMapping)
-     && (!hostVisible || hasCpuMapping)
-     && (!hasCpuMapping || (!(cpuMapping & 4095u)
-       && association.outer_allocation_bytes
-          <= uint64_t(UINTPTR_MAX - cpuMapping)));
+    uint32_t failed = 0;
+    if (!bytes)                                                        failed |= 1u << 0;
+    if (association.s_type != HELIOS_RESOURCE_ASSOCIATION_STRUCTURE_TYPE) failed |= 1u << 1;
+    if (association.struct_bytes != HELIOS_RESOURCE_ASSOCIATION_BYTES) failed |= 1u << 2;
+    if (association.abi_version != HELIOS_RESOURCE_ASSOCIATION_ABI_VERSION) failed |= 1u << 3;
+    if (association.reserved)                                          failed |= 1u << 4;
+    if (association.package_generation != HELIOS_PACKAGE_GENERATION)   failed |= 1u << 5;
+    if (!association.device_generation)                                failed |= 1u << 6;
+    if (!association.outer_allocation_token)                           failed |= 1u << 7;
+    if (association.outer_allocation_bytes < bytes)                    failed |= 1u << 8;
+    if (association.association_flags & ~HELIOS_RESOURCE_ASSOCIATION_FLAG_MASK) failed |= 1u << 9;
+    if (association.reserved1)                                         failed |= 1u << 10;
+    if (!!association.cpu_mapping != hasCpuMapping)                    failed |= 1u << 11;
+    if (hostVisible && !hasCpuMapping)                                 failed |= 1u << 12;
+    if (hasCpuMapping && ((cpuMapping & 4095u)
+      || association.outer_allocation_bytes > uint64_t(UINTPTR_MAX - cpuMapping)))
+                                                                       failed |= 1u << 13;
+    if (failed) {
+      Logger::err(str::format("Helios association validate terms=0x", std::hex,
+        failed, std::dec, " bytes=", bytes, " assocBytes=",
+        association.outer_allocation_bytes, " props=0x", std::hex,
+        memoryProperties, " flags=0x", association.association_flags, std::dec,
+        " cpuMap=", association.cpu_mapping ? 1 : 0));
+    }
+    return !failed;
   }
 
 
@@ -372,6 +412,80 @@ namespace dxvk {
     const DxvkImageCreateInfo&  createInfo,
           VkMemoryPropertyFlags memoryType) {
     return new DxvkImage(this, createInfo, m_objects.memoryManager(), memoryType);
+  }
+
+
+  VkImage DxvkDevice::createImageForMemoryRequirements(
+    const DxvkImageCreateInfo&  createInfo,
+          VkMemoryRequirements2& requirements) {
+    VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    info.flags = createInfo.flags;
+    info.imageType = createInfo.type;
+    info.format = createInfo.format;
+    info.extent = createInfo.extent;
+    info.mipLevels = createInfo.mipLevels;
+    info.arrayLayers = createInfo.numLayers;
+    info.samples = createInfo.sampleCount;
+    info.tiling = createInfo.tiling;
+    info.usage = createInfo.usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = createInfo.initialLayout;
+
+    VkImageFormatListCreateInfo formatList = {
+      VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO };
+    if ((createInfo.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
+     && createInfo.viewFormatCount) {
+      formatList.viewFormatCount = createInfo.viewFormatCount;
+      formatList.pViewFormats = createInfo.viewFormats;
+      info.pNext = &formatList;
+    }
+
+    VkImage image = VK_NULL_HANDLE;
+    VkResult vr = m_vkd->vkCreateImage(m_vkd->device(), &info, nullptr, &image);
+    if (vr != VK_SUCCESS) {
+      Logger::err(str::format(
+        "Helios image-requirements preflight: vkCreateImage failed vr=", int32_t(vr),
+        " format=", uint32_t(info.format),
+        " extent=", info.extent.width, "x", info.extent.height, "x", info.extent.depth,
+        " flags=0x", std::hex, info.flags,
+        " usage=0x", info.usage));
+      return VK_NULL_HANDLE;
+    }
+
+    VkImageMemoryRequirementsInfo2 query = {
+      VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2 };
+    query.image = image;
+    m_vkd->vkGetImageMemoryRequirements2(
+      m_vkd->device(), &query, &requirements);
+    if (!requirements.memoryRequirements.size) {
+      Logger::err(str::format(
+        "Helios image-requirements preflight: zero requirements",
+        " format=", uint32_t(info.format),
+        " extent=", info.extent.width, "x", info.extent.height, "x", info.extent.depth,
+        " flags=0x", std::hex, info.flags,
+        " usage=0x", info.usage,
+        " alignment=0x", requirements.memoryRequirements.alignment,
+        " memoryTypeBits=0x", requirements.memoryRequirements.memoryTypeBits));
+      m_vkd->vkDestroyImage(m_vkd->device(), image, nullptr);
+      return VK_NULL_HANDLE;
+    }
+    return image;
+  }
+
+
+  Rc<DxvkImage> DxvkDevice::adoptImage(
+    const DxvkImageCreateInfo&  createInfo,
+          VkImage               image,
+          VkMemoryPropertyFlags memoryType) {
+    return new DxvkImage(this, createInfo,
+      m_objects.memoryManager(), memoryType, image);
+  }
+
+
+  void DxvkDevice::destroyImageForMemoryRequirements(
+          VkImage               image) {
+    if (image)
+      m_vkd->vkDestroyImage(m_vkd->device(), image, nullptr);
   }
   
   

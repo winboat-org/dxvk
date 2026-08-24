@@ -236,6 +236,16 @@ namespace dxvk {
 
     VkResult joinHeliosOuterSubmit() const;
 
+    /**
+     * \brief Queries memory requirements for a buffer create info
+     *
+     * Device-level maintenance4 query: the requirement the exact
+     * buffer would report, with no buffer created. The Helios buffer
+     * preflight sizes the outer WDDM allocation from this.
+     */
+    VkMemoryRequirements queryBufferMemoryRequirements(
+      const DxvkBufferCreateInfo&     createInfo) const;
+
     VkResult createHeliosOuterAllocation(
             VkDeviceSize                 bytes,
             VkMemoryPropertyFlags       memoryProperties,
@@ -494,6 +504,26 @@ namespace dxvk {
     Rc<DxvkImage> createImage(
       const DxvkImageCreateInfo&  createInfo,
             VkMemoryPropertyFlags memoryType);
+
+    /**
+     * \brief Queries image memory requirements without creating storage
+     *
+     * Uses the same Vulkan create-info shape as \ref createImage. The returned
+     * storage-less image remains the exact image later adopted by the resource,
+     * so HRA1 can carry the measured bound without a destroy/recreate ordering
+     * gap or any secondary identity lookup.
+     */
+    VkImage createImageForMemoryRequirements(
+      const DxvkImageCreateInfo&  createInfo,
+            VkMemoryRequirements2& requirements);
+
+    Rc<DxvkImage> adoptImage(
+      const DxvkImageCreateInfo&  createInfo,
+            VkImage               image,
+            VkMemoryPropertyFlags memoryType);
+
+    void destroyImageForMemoryRequirements(
+            VkImage               image);
     
     /**
      * \brief Creates a sampler object
@@ -649,6 +679,17 @@ namespace dxvk {
      */
     DxvkSamplerDescriptorSet getSamplerDescriptorSet() {
       return m_objects.samplerPool().getDescriptorSetInfo();
+    }
+
+    /**
+     * \brief Creates a submission-owned immutable sampler set
+     *
+     * Record-only Helios contexts use this instead of update-after-bind.
+     * The caller must track the returned object on the command list.
+     */
+    Rc<DxvkSamplerDescriptorSnapshot> createSamplerDescriptorSnapshot(
+            std::vector<Rc<DxvkSampler>> samplers) {
+      return m_objects.samplerPool().createDescriptorSnapshot(std::move(samplers));
     }
 
     /**

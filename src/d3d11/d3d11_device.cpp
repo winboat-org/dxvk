@@ -293,6 +293,73 @@ namespace dxvk {
       *ppTexture2D = texture;
     return hr;
   }
+
+
+  HRESULT D3D11Device::PrepareTexture2DHelios(
+    const D3D11_TEXTURE2D_DESC*   pDesc,
+          VkMemoryRequirements*  pRequirements,
+          VkImage*                pImage) {
+    if (!pDesc || !pRequirements || !pImage || *pImage)
+      return E_INVALIDARG;
+
+    D3D11_COMMON_TEXTURE_DESC desc = { };
+    desc.Width = pDesc->Width;
+    desc.Height = pDesc->Height;
+    desc.Depth = 1;
+    desc.MipLevels = pDesc->MipLevels;
+    desc.ArraySize = pDesc->ArraySize;
+    desc.Format = pDesc->Format;
+    desc.SampleDesc = pDesc->SampleDesc;
+    desc.Usage = pDesc->Usage;
+    desc.BindFlags = pDesc->BindFlags;
+    desc.CPUAccessFlags = pDesc->CPUAccessFlags;
+    desc.MiscFlags = pDesc->MiscFlags;
+    desc.TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
+
+    HRESULT hr = D3D11CommonTexture::NormalizeTextureProperties(&desc);
+    if (FAILED(hr))
+      return hr;
+
+    *pRequirements = { };
+    D3D11_HELIOS_CREATE_INFO query = { };
+    query.MemoryRequirements = pRequirements;
+    query.PrecreatedImage = pImage;
+    try {
+      D3D11CommonTexture texture(nullptr, this, &desc, nullptr,
+        D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, VK_NULL_HANDLE, nullptr, &query);
+      return pRequirements->size && *pImage ? S_OK : E_FAIL;
+    } catch (const DxvkError& e) {
+      Logger::err(e.message());
+      return E_INVALIDARG;
+    }
+  }
+
+
+  HRESULT D3D11Device::PrepareBufferHelios(
+    const D3D11_BUFFER_DESC*      pDesc,
+          VkMemoryRequirements*  pRequirements) {
+    if (!pDesc || !pRequirements)
+      return E_INVALIDARG;
+
+    D3D11_BUFFER_DESC desc = *pDesc;
+    HRESULT hr = D3D11Buffer::NormalizeBufferProperties(&desc);
+    if (FAILED(hr))
+      return hr;
+
+    // Tile pools and sparse buffers own no single outer allocation.
+    if (desc.MiscFlags & (D3D11_RESOURCE_MISC_TILED | D3D11_RESOURCE_MISC_TILE_POOL))
+      return E_INVALIDARG;
+
+    *pRequirements = GetDXVKDevice()->queryBufferMemoryRequirements(
+      D3D11Buffer::GetDxvkBufferCreateInfo(this, &desc));
+    return pRequirements->size ? S_OK : E_FAIL;
+  }
+
+
+  void D3D11Device::DiscardTexture2DHeliosPreflight(
+          VkImage                 image) {
+    GetDXVKDevice()->destroyImageForMemoryRequirements(image);
+  }
   
   
   HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture2D1(

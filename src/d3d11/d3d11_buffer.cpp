@@ -15,79 +15,10 @@ namespace dxvk {
     m_resource    (this, pDevice),
     m_d3d10       (this),
     m_destructionNotifier(this) {
-    DxvkBufferCreateInfo info;
-    info.flags  = 0;
-    info.size   = pDesc->ByteWidth;
-    info.usage  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
-                | VK_BUFFER_USAGE_TRANSFER_DST_BIT
-                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    info.access = VK_ACCESS_TRANSFER_READ_BIT
-                | VK_ACCESS_TRANSFER_WRITE_BIT;
+    DxvkBufferCreateInfo info = GetDxvkBufferCreateInfo(pDevice, pDesc);
 
     if (pHeliosAssociation)
       info.heliosAssociation = *pHeliosAssociation;
-    
-    if (pDesc->BindFlags & D3D11_BIND_VERTEX_BUFFER) {
-      info.usage  |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-      info.stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
-      info.access |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
-    }
-    
-    if (pDesc->BindFlags & D3D11_BIND_INDEX_BUFFER) {
-      info.usage  |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-      info.stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
-      info.access |= VK_ACCESS_INDEX_READ_BIT;
-    }
-    
-    if (pDesc->BindFlags & D3D11_BIND_CONSTANT_BUFFER) {
-      info.usage  |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-      info.stages |= m_parent->GetEnabledShaderStages();
-      info.access |= VK_ACCESS_UNIFORM_READ_BIT;
-    }
-    
-    if (pDesc->BindFlags & D3D11_BIND_SHADER_RESOURCE) {
-      info.usage  |= VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT
-                  |  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-      info.stages |= m_parent->GetEnabledShaderStages();
-      info.access |= VK_ACCESS_SHADER_READ_BIT;
-    }
-    
-    if (pDesc->BindFlags & D3D11_BIND_STREAM_OUTPUT) {
-      info.usage  |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
-      info.stages |= VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
-      info.access |= VK_ACCESS_TRANSFORM_FEEDBACK_WRITE_BIT_EXT;
-    }
-    
-    if (pDesc->BindFlags & D3D11_BIND_UNORDERED_ACCESS) {
-      info.usage  |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT
-                  |  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-      info.stages |= m_parent->GetEnabledShaderStages();
-      info.access |= VK_ACCESS_SHADER_READ_BIT
-                  |  VK_ACCESS_SHADER_WRITE_BIT;
-    }
-    
-    if (pDesc->MiscFlags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS) {
-      info.usage  |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-      info.stages |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
-      info.access |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-    }
-
-    if (pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILED) {
-      info.flags  |= VK_BUFFER_CREATE_SPARSE_BINDING_BIT
-                  |  VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT
-                  |  VK_BUFFER_CREATE_SPARSE_ALIASED_BIT;
-    }
-
-    // Set host read bit as necessary. We may internally read staging
-    // buffer contents even if the buffer is not marked for reading.
-    if (pDesc->CPUAccessFlags && pDesc->Usage != D3D11_USAGE_DYNAMIC) {
-      info.stages |= VK_PIPELINE_STAGE_HOST_BIT;
-      info.access |= VK_ACCESS_HOST_READ_BIT;
-
-      if (pDesc->CPUAccessFlags & D3D11_CPU_ACCESS_WRITE)
-        info.access |= VK_ACCESS_HOST_WRITE_BIT;
-    }
 
     if (p11on12Info) {
       m_11on12 = *p11on12Info;
@@ -228,6 +159,84 @@ namespace dxvk {
         ctx->setDebugName(cBuffer, cName.c_str());
       });
     }
+  }
+
+
+  DxvkBufferCreateInfo D3D11Buffer::GetDxvkBufferCreateInfo(
+          D3D11Device*                pDevice,
+    const D3D11_BUFFER_DESC*          pDesc) {
+    DxvkBufferCreateInfo info;
+    info.flags  = 0;
+    info.size   = pDesc->ByteWidth;
+    info.usage  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    info.access = VK_ACCESS_TRANSFER_READ_BIT
+                | VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    if (pDesc->BindFlags & D3D11_BIND_VERTEX_BUFFER) {
+      info.usage  |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+      info.stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+      info.access |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    }
+
+    if (pDesc->BindFlags & D3D11_BIND_INDEX_BUFFER) {
+      info.usage  |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+      info.stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+      info.access |= VK_ACCESS_INDEX_READ_BIT;
+    }
+
+    if (pDesc->BindFlags & D3D11_BIND_CONSTANT_BUFFER) {
+      info.usage  |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+      info.stages |= pDevice->GetEnabledShaderStages();
+      info.access |= VK_ACCESS_UNIFORM_READ_BIT;
+    }
+
+    if (pDesc->BindFlags & D3D11_BIND_SHADER_RESOURCE) {
+      info.usage  |= VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT
+                  |  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+      info.stages |= pDevice->GetEnabledShaderStages();
+      info.access |= VK_ACCESS_SHADER_READ_BIT;
+    }
+
+    if (pDesc->BindFlags & D3D11_BIND_STREAM_OUTPUT) {
+      info.usage  |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
+      info.stages |= VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
+      info.access |= VK_ACCESS_TRANSFORM_FEEDBACK_WRITE_BIT_EXT;
+    }
+
+    if (pDesc->BindFlags & D3D11_BIND_UNORDERED_ACCESS) {
+      info.usage  |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT
+                  |  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+      info.stages |= pDevice->GetEnabledShaderStages();
+      info.access |= VK_ACCESS_SHADER_READ_BIT
+                  |  VK_ACCESS_SHADER_WRITE_BIT;
+    }
+
+    if (pDesc->MiscFlags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS) {
+      info.usage  |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+      info.stages |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+      info.access |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    }
+
+    if (pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILED) {
+      info.flags  |= VK_BUFFER_CREATE_SPARSE_BINDING_BIT
+                  |  VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT
+                  |  VK_BUFFER_CREATE_SPARSE_ALIASED_BIT;
+    }
+
+    // Set host read bit as necessary. We may internally read staging
+    // buffer contents even if the buffer is not marked for reading.
+    if (pDesc->CPUAccessFlags && pDesc->Usage != D3D11_USAGE_DYNAMIC) {
+      info.stages |= VK_PIPELINE_STAGE_HOST_BIT;
+      info.access |= VK_ACCESS_HOST_READ_BIT;
+
+      if (pDesc->CPUAccessFlags & D3D11_CPU_ACCESS_WRITE)
+        info.access |= VK_ACCESS_HOST_WRITE_BIT;
+    }
+
+    return info;
   }
 
 

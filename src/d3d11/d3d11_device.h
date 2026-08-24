@@ -124,6 +124,18 @@ namespace dxvk {
       const D3D11_SUBRESOURCE_DATA* pInitialData,
       const D3D11_HELIOS_CREATE_INFO* pHeliosCreate,
             ID3D11Texture2D**       ppTexture2D);
+
+    HRESULT PrepareTexture2DHelios(
+      const D3D11_TEXTURE2D_DESC*   pDesc,
+            VkMemoryRequirements*  pRequirements,
+            VkImage*                pImage);
+
+    HRESULT PrepareBufferHelios(
+      const D3D11_BUFFER_DESC*      pDesc,
+            VkMemoryRequirements*  pRequirements);
+
+    void DiscardTexture2DHeliosPreflight(
+            VkImage                 image);
     
     HRESULT STDMETHODCALLTYPE CreateTexture2D1(
       const D3D11_TEXTURE2D_DESC1*  pDesc,

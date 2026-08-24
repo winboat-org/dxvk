@@ -167,6 +167,17 @@ namespace dxvk {
      * \param [in] pDesc Buffer description
      * \returns \c S_OK if the parameters are valid
      */
+    /**
+     * \brief Computes DXVK buffer create info for a D3D11 description
+     *
+     * The exact info the buffer constructor uses; the Helios buffer
+     * preflight queries memory requirements from the same value so the
+     * outer WDDM allocation can never undershoot the import requirement.
+     */
+    static DxvkBufferCreateInfo GetDxvkBufferCreateInfo(
+            D3D11Device*                pDevice,
+      const D3D11_BUFFER_DESC*          pDesc);
+
     static HRESULT NormalizeBufferProperties(
             D3D11_BUFFER_DESC*      pDesc);
 

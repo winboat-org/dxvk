@@ -1173,20 +1173,25 @@ namespace dxvk {
   Rc<DxvkResourceAllocation> DxvkMemoryAllocator::createImageResource(
     const VkImageCreateInfo&          createInfo,
     const DxvkAllocationInfo&         allocationInfo,
-    const void*                       next) {
+    const void*                       next,
+          VkImage                     precreatedImage) {
     auto vk = m_device->vkd();
 
-    VkImage image = VK_NULL_HANDLE;
-    VkResult vr = vk->vkCreateImage(vk->device(), &createInfo, nullptr, &image);
+    VkImage image = precreatedImage;
+    VkResult vr = VK_SUCCESS;
 
-    if (vr != VK_SUCCESS) {
-      throw DxvkError(str::format("Failed to create image: ", vr,
-        "\n  type:    ", createInfo.imageType,
-        "\n  format:  ", createInfo.format,
-        "\n  extent:  ", createInfo.extent.width, "x", createInfo.extent.height, "x", createInfo.extent.depth,
-        "\n  layers:  ", createInfo.arrayLayers,
-        "\n  mips:    ", createInfo.mipLevels,
-        "\n  samples: ", createInfo.samples));
+    if (!image) {
+      vr = vk->vkCreateImage(vk->device(), &createInfo, nullptr, &image);
+
+      if (vr != VK_SUCCESS) {
+        throw DxvkError(str::format("Failed to create image: ", vr,
+          "\n  type:    ", createInfo.imageType,
+          "\n  format:  ", createInfo.format,
+          "\n  extent:  ", createInfo.extent.width, "x", createInfo.extent.height, "x", createInfo.extent.depth,
+          "\n  layers:  ", createInfo.arrayLayers,
+          "\n  mips:    ", createInfo.mipLevels,
+          "\n  samples: ", createInfo.samples));
+      }
     }
 
     // Check memory requirements, including whether or not we need a dedicated allocation
@@ -1416,22 +1421,26 @@ namespace dxvk {
       return DxvkDeviceMemory();
     }
 
-    HeliosResourceAssociationV1 internalAssociation = { };
+    HeliosResourceAssociationV1 chainedAssociation = { };
     const HeliosResourceAssociationV1* exactAssociation = heliosAssociation;
     bool internalOuterAllocation = false;
     if (m_device->instance()->isRecordOnlyDirect() && !exactAssociation) {
       VkResult associationResult = m_device->createHeliosOuterAllocation(
-        size, type.properties.propertyFlags, &internalAssociation);
-      if (associationResult != VK_SUCCESS)
+        size, type.properties.propertyFlags, &chainedAssociation);
+      if (associationResult != VK_SUCCESS) {
+        Logger::err(str::format("Helios internal chunk refused: result=",
+          associationResult, " size=", size, " type=", type.index));
         return DxvkDeviceMemory();
-      internalAssociation.p_next = next;
-      next = &internalAssociation;
-      exactAssociation = &internalAssociation;
+      }
+      exactAssociation = &chainedAssociation;
       internalOuterAllocation = true;
     }
 
     if (exactAssociation && !m_device->validateHeliosOuterAssociation(
           *exactAssociation, size, type.properties.propertyFlags)) {
+      Logger::err(str::format("Helios association re-validate refused: size=",
+        size, " type=", type.index,
+        " token=", exactAssociation->outer_allocation_token));
       if (internalOuterAllocation) {
         void* scope = m_device->beginHeliosOuterAllocationTeardown(
           exactAssociation->device_generation,
@@ -1445,6 +1454,48 @@ namespace dxvk {
           teardownResult);
       }
       return DxvkDeviceMemory();
+    }
+
+    if (exactAssociation) {
+      /* Associated resources already put their immutable HRA1 behind the
+       * VkMemoryDedicatedAllocateInfo passed as `next`. Internal allocator
+       * clients have no such node, so add the stack-owned record only for that
+       * arm. In either case require one exact record: two HRA1 nodes make the
+       * lower ICD reject the allocation rather than guess which one owns it. */
+      const HeliosResourceAssociationV1* chainAssociation = nullptr;
+      uint32_t chainAssociationCount = 0;
+      for (auto node = reinterpret_cast<const VkBaseInStructure*>(next);
+           node; node = node->pNext) {
+        if (uint32_t(node->sType) == HELIOS_RESOURCE_ASSOCIATION_STRUCTURE_TYPE) {
+          chainAssociation = reinterpret_cast<const HeliosResourceAssociationV1*>(node);
+          chainAssociationCount++;
+        }
+      }
+
+      if (chainAssociationCount > 1
+       || (chainAssociation && chainAssociation != exactAssociation)) {
+        if (internalOuterAllocation) {
+          void* scope = m_device->beginHeliosOuterAllocationTeardown(
+            exactAssociation->device_generation,
+            exactAssociation->outer_allocation_token);
+          VkResult teardownResult = scope
+            ? m_device->finishHeliosOuterSubmit(scope, VK_SUCCESS)
+            : VK_ERROR_DEVICE_LOST;
+          m_device->retireHeliosOuterAllocation(
+            exactAssociation->device_generation,
+            exactAssociation->outer_allocation_token,
+            teardownResult);
+        }
+        return DxvkDeviceMemory();
+      }
+
+      if (!chainAssociation) {
+        if (exactAssociation != &chainedAssociation)
+          chainedAssociation = *exactAssociation;
+        chainedAssociation.p_next = next;
+        next = &chainedAssociation;
+        exactAssociation = &chainedAssociation;
+      }
     }
 
     VkMemoryAllocateInfo memoryInfo = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, next };
@@ -1486,10 +1537,26 @@ namespace dxvk {
     DxvkDeviceMemory result = { };
     result.size = size;
 
-    if (vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory)) {
+    VkResult allocationResult =
+      vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory);
+    if (allocationResult != VK_SUCCESS) {
+      if (exactAssociation) {
+        Logger::err(str::format("Helios outer vkAllocateMemory failed: result=",
+          allocationResult, " token=", exactAssociation->outer_allocation_token,
+          " generation=", exactAssociation->device_generation,
+          " size=", size, " memoryType=", type.index));
+      }
       freeEmptyChunksInHeap(*type.heap, VkDeviceSize(-1), high_resolution_clock::time_point());
 
-      if (vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory)) {
+      allocationResult =
+        vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory);
+      if (allocationResult != VK_SUCCESS) {
+        if (exactAssociation) {
+          Logger::err(str::format("Helios outer vkAllocateMemory retry failed: result=",
+            allocationResult, " token=", exactAssociation->outer_allocation_token,
+            " generation=", exactAssociation->device_generation,
+            " size=", size, " memoryType=", type.index));
+        }
         if (internalOuterAllocation) {
           void* scope = m_device->beginHeliosOuterAllocationTeardown(
             exactAssociation->device_generation,
