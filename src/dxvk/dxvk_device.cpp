@@ -126,7 +126,14 @@ namespace dxvk {
     info.flags = createInfo.flags;
     info.usage = createInfo.usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     info.size  = createInfo.size;
-    getSharingMode().fill(info);
+    // Must outlive `info`: fill() stores queueFamilies.data() into
+    // pQueueFamilyIndices, and getSharingMode() returns by value. As a
+    // temporary it died at the semicolon and the compiler reused the slot for
+    // `requirements` below, so the host saw pQueueFamilyIndices[0] ==
+    // VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 (1000146003) on the
+    // vkCreateBuffer venus turns this query into — 73 a boot.
+    const DxvkSharingModeInfo sharingMode = getSharingMode();
+    sharingMode.fill(info);
 
     VkDeviceBufferMemoryRequirements query = { VK_STRUCTURE_TYPE_DEVICE_BUFFER_MEMORY_REQUIREMENTS };
     query.pCreateInfo = &info;
