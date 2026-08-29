@@ -494,22 +494,27 @@ namespace dxvk {
   void DxvkDeviceCapabilities::disableUnusedFeatures(
     const DxvkInstance&               instance,
           bool                        safeMode) {
-    /* The unbound-buffer arm of vkGetBufferDeviceAddress is intentionally
-     * specified only by VK_EXT_buffer_device_address.  Record-only Helios
-     * therefore selects that arm (and its capture/replay bit) while generic
-     * DXVK keeps the promoted Vulkan 1.2 feature.  Enabling both is forbidden
-     * by VUID-VkDeviceCreateInfo-pNext-04748. */
-    if (m_recordOnlyDirect) {
-      m_featuresSupported.vk12.bufferDeviceAddress = VK_FALSE;
-      m_featuresSupported.vk12.bufferDeviceAddressCaptureReplay = VK_FALSE;
-      m_featuresSupported.vk12.bufferDeviceAddressMultiDevice = VK_FALSE;
-      m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressMultiDevice = VK_FALSE;
-    } else {
-      m_featuresSupported.vk12.bufferDeviceAddressCaptureReplay = VK_FALSE;
-      m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddress = VK_FALSE;
-      m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressCaptureReplay = VK_FALSE;
-      m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressMultiDevice = VK_FALSE;
-    }
+    /* Both arms cannot be enabled at once (VUID-VkDeviceCreateInfo-pNext-04748),
+     * so this picks one. It picks the PROMOTED Vulkan 1.2 feature, for
+     * record-only Helios too.
+     *
+     * The EXT arm used to be selected here because the unbound-buffer arm of
+     * vkGetBufferDeviceAddress is specified only by VK_EXT_buffer_device_address.
+     * That is true, and it cost the entire renderer: the host reported
+     * "bufferDeviceAddress feature is not enabled" on every
+     * vkCreateGraphicsPipelines and vkCreateComputePipelines whose SPIR-V
+     * declares PhysicalStorageBufferAddresses, ~110 times a boot, and a pipeline
+     * that fails to create makes DXVK skip the draw. Measured 2026-08-29:
+     * occlusion 0/4096 with every pipeline statistic zero, against a WARP
+     * control reporting 4096 — nothing rasterised at all.
+     *
+     * DxvkMemoryAllocator::getBufferDeviceAddress is the only caller, and it
+     * queries a buffer it has just bound, so the EXT-only unbound arm is not
+     * actually exercised. */
+    m_featuresSupported.vk12.bufferDeviceAddressCaptureReplay = VK_FALSE;
+    m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddress = VK_FALSE;
+    m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressCaptureReplay = VK_FALSE;
+    m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressMultiDevice = VK_FALSE;
 
     if (m_featuresSupported.extDescriptorHeap.descriptorHeap) {
       // Only enable descriptor heaps on drivers that are known to work and don't
@@ -914,7 +919,7 @@ namespace dxvk {
       ENABLE_FEATURE(vk11, storageBuffer16BitAccess, true),
       ENABLE_FEATURE(vk11, storagePushConstant16, false),
 
-      ENABLE_FEATURE(vk12, bufferDeviceAddress, !m_recordOnlyDirect),
+      ENABLE_FEATURE(vk12, bufferDeviceAddress, true),
       ENABLE_FEATURE(vk12, bufferDeviceAddressCaptureReplay, false),
       ENABLE_FEATURE(vk12, descriptorIndexing, true),
       ENABLE_FEATURE(vk12, storageBuffer8BitAccess, true),
@@ -959,8 +964,8 @@ namespace dxvk {
       ENABLE_FEATURE(vk13, synchronization2, true),
 
       /* Record-only allocation deferral needs the EXT-only unbound query arm. */
-      ENABLE_EXT_FEATURE(extBufferDeviceAddress, bufferDeviceAddress, m_recordOnlyDirect),
-      ENABLE_EXT_FEATURE(extBufferDeviceAddress, bufferDeviceAddressCaptureReplay, m_recordOnlyDirect),
+      ENABLE_EXT_FEATURE(extBufferDeviceAddress, bufferDeviceAddress, false),
+      ENABLE_EXT_FEATURE(extBufferDeviceAddress, bufferDeviceAddressCaptureReplay, false),
 
       /* Allows sampling currently bound render targets for client APIs */
       ENABLE_EXT_FEATURE(extAttachmentFeedbackLoopLayout, attachmentFeedbackLoopLayout, false),
