@@ -436,7 +436,8 @@ namespace dxvk {
             DxvkDevice*           device,
       const DxvkImageCreateInfo&  createInfo,
             DxvkMemoryAllocator&  allocator,
-            VkMemoryPropertyFlags memFlags);
+            VkMemoryPropertyFlags memFlags,
+            VkImage               precreatedImage = VK_NULL_HANDLE);
     
     /**
      * \brief Creates image object from existing image
@@ -687,7 +688,8 @@ namespace dxvk {
      * The returned image can be used as backing storage.
      * \returns New underlying image resource
      */
-    Rc<DxvkResourceAllocation> allocateStorage();
+    Rc<DxvkResourceAllocation> allocateStorage(
+            VkImage                     precreatedImage = VK_NULL_HANDLE);
 
     /**
      * \brief Creates image resource with extra usage
@@ -700,7 +702,8 @@ namespace dxvk {
      */
     Rc<DxvkResourceAllocation> allocateStorageWithUsage(
       const DxvkImageUsageInfo&         usage,
-            DxvkAllocationModes         mode);
+            DxvkAllocationModes         mode,
+            VkImage                     precreatedImage = VK_NULL_HANDLE);
 
     /**
      * \brief Assigns backing storage to the image

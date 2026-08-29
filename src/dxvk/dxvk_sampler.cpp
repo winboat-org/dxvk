@@ -169,6 +169,95 @@ namespace dxvk {
 
 
 
+  DxvkSamplerDescriptorSnapshot::DxvkSamplerDescriptorSnapshot(
+          DxvkDevice*                  device,
+          VkDescriptorSetLayout        layout,
+          uint32_t                     descriptorCount,
+          std::vector<Rc<DxvkSampler>> samplers)
+  : m_device(device), m_samplers(std::move(samplers)) {
+    auto vk = m_device->vkd();
+
+    std::vector<VkDescriptorImageInfo> descriptors(descriptorCount);
+    std::vector<bool> populated(descriptorCount, false);
+
+    for (const auto& sampler : m_samplers) {
+      if (!sampler)
+        continue;
+
+      const auto descriptor = sampler->getDescriptor();
+      if (!descriptor.samplerObject || descriptor.samplerIndex >= descriptorCount)
+        throw DxvkError("Invalid sampler in immutable descriptor snapshot");
+
+      auto& info = descriptors[descriptor.samplerIndex];
+      if (populated[descriptor.samplerIndex]) {
+        if (info.sampler != descriptor.samplerObject)
+          throw DxvkError("Conflicting sampler index in immutable descriptor snapshot");
+        continue;
+      }
+
+      info.sampler = descriptor.samplerObject;
+      populated[descriptor.samplerIndex] = true;
+    }
+
+    VkDescriptorPoolSize poolSize = { };
+    poolSize.type = VK_DESCRIPTOR_TYPE_SAMPLER;
+    poolSize.descriptorCount = descriptorCount;
+
+    VkDescriptorPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    poolInfo.maxSets = 1u;
+    poolInfo.poolSizeCount = 1u;
+    poolInfo.pPoolSizes = &poolSize;
+
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkResult vr = vk->vkCreateDescriptorPool(vk->device(), &poolInfo, nullptr, &pool);
+    if (vr)
+      throw DxvkError(str::format("Failed to create immutable sampler descriptor pool: ", vr));
+
+    VkDescriptorSetAllocateInfo setInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    setInfo.descriptorPool = pool;
+    setInfo.descriptorSetCount = 1u;
+    setInfo.pSetLayouts = &layout;
+
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    vr = vk->vkAllocateDescriptorSets(vk->device(), &setInfo, &set);
+    if (vr) {
+      vk->vkDestroyDescriptorPool(vk->device(), pool, nullptr);
+      throw DxvkError(str::format("Failed to allocate immutable sampler descriptor set: ", vr));
+    }
+
+    std::vector<VkWriteDescriptorSet> writes;
+    writes.reserve(m_samplers.size());
+
+    for (uint32_t i = 0u; i < descriptorCount; i++) {
+      if (!populated[i])
+        continue;
+
+      auto& write = writes.emplace_back();
+      write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      write.dstSet = set;
+      write.dstArrayElement = i;
+      write.descriptorCount = 1u;
+      write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+      write.pImageInfo = &descriptors[i];
+    }
+
+    vk->vkUpdateDescriptorSets(vk->device(), uint32_t(writes.size()), writes.data(), 0u, nullptr);
+
+    m_pool = pool;
+    m_set = set;
+    m_device->addStatCtr(DxvkStatCounter::DescriptorPoolCount, 1u);
+  }
+
+
+  DxvkSamplerDescriptorSnapshot::~DxvkSamplerDescriptorSnapshot() {
+    if (m_pool) {
+      m_device->vkd()->vkDestroyDescriptorPool(
+        m_device->vkd()->device(), m_pool, nullptr);
+      m_device->addStatCtr(DxvkStatCounter::DescriptorPoolCount, uint64_t(-1ll));
+    }
+  }
+
+
   DxvkSamplerDescriptorHeap::DxvkSamplerDescriptorHeap(
           DxvkDevice*               device,
           uint32_t                  size)
@@ -178,7 +267,7 @@ namespace dxvk {
 
     if (device->canUseDescriptorHeap() || device->canUseDescriptorBuffer())
       initDescriptorHeap();
-    else
+    else if (!device->instance()->isRecordOnlyDirect())
       initDescriptorPool();
   }
 
@@ -196,6 +285,16 @@ namespace dxvk {
     result.set = m_legacy.set;
     result.layout = m_legacy.setLayout;
     return result;
+  }
+
+
+  Rc<DxvkSamplerDescriptorSnapshot> DxvkSamplerDescriptorHeap::createDescriptorSnapshot(
+          std::vector<Rc<DxvkSampler>> samplers) const {
+    if (!m_device->instance()->isRecordOnlyDirect() || !m_legacy.setLayout)
+      throw DxvkError("Immutable sampler snapshots require a record-only legacy descriptor layout");
+
+    return new DxvkSamplerDescriptorSnapshot(
+      m_device, m_legacy.setLayout, m_descriptorCount, std::move(samplers));
   }
 
 
@@ -267,7 +366,7 @@ namespace dxvk {
 
       vk->vkGetDescriptorEXT(vk->device(), &info, m_heap.descriptorSize,
         m_heap.buffer->mapPtr(m_heap.descriptorOffset + m_heap.descriptorSize * index));
-    } else {
+    } else if (!m_device->instance()->isRecordOnlyDirect()) {
       VkDescriptorImageInfo samplerInfo = { };
       samplerInfo.sampler = descriptor.samplerObject;
 
@@ -307,9 +406,12 @@ namespace dxvk {
     VkDescriptorBindingFlags bindingFlags = 0u;
 
     if (!m_device->canUseDescriptorBuffer()) {
-      bindingFlags |= VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
-                   |  VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
-                   |  VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+      bindingFlags |= VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+
+      if (!m_device->instance()->isRecordOnlyDirect()) {
+        bindingFlags |= VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+                     |  VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+      }
     }
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo layoutFlags = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO };
@@ -319,6 +421,8 @@ namespace dxvk {
     VkDescriptorSetLayoutCreateInfo layoutInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, &layoutFlags };
     layoutInfo.flags = m_device->canUseDescriptorBuffer()
       ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+      : m_device->instance()->isRecordOnlyDirect()
+      ? 0u
       : VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
     layoutInfo.bindingCount = 1u;
     layoutInfo.pBindings = &binding;

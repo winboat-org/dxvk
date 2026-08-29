@@ -3,6 +3,7 @@
 #include <map>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include "../util/util_bit.h"
 #include "../util/thread.h"
@@ -262,6 +263,39 @@ namespace dxvk {
 
 
   /**
+   * \brief Immutable sampler descriptor-set snapshot
+   *
+   * Record-only Helios instances cannot advertise update-after-bind because
+   * A7 seals resource descriptor closure while recording. Each snapshot owns
+   * a private pool and retains every sampler written into the set until the
+   * command list that bound it has completed.
+   */
+  class DxvkSamplerDescriptorSnapshot : public RcObject {
+  public:
+
+    DxvkSamplerDescriptorSnapshot(
+            DxvkDevice*               device,
+            VkDescriptorSetLayout     layout,
+            uint32_t                  descriptorCount,
+            std::vector<Rc<DxvkSampler>> samplers);
+
+    ~DxvkSamplerDescriptorSnapshot();
+
+    VkDescriptorSet set() const {
+      return m_set;
+    }
+
+  private:
+
+    DxvkDevice*                 m_device = nullptr;
+    VkDescriptorPool            m_pool   = VK_NULL_HANDLE;
+    VkDescriptorSet             m_set    = VK_NULL_HANDLE;
+    std::vector<Rc<DxvkSampler>> m_samplers;
+
+  };
+
+
+  /**
    * \brief Sampler descriptor pool
    *
    * Manages a global descriptor pool and set for samplers.
@@ -281,6 +315,15 @@ namespace dxvk {
      * \returns Descriptor set and layout handles
      */
     DxvkSamplerDescriptorSet getDescriptorSetInfo() const;
+
+    /**
+     * \brief Creates an immutable descriptor-set snapshot
+     *
+     * Used only by the record-only direct translator path. The returned
+     * object must be tracked by the command list that binds it.
+     */
+    Rc<DxvkSamplerDescriptorSnapshot> createDescriptorSnapshot(
+            std::vector<Rc<DxvkSampler>> samplers) const;
 
     /**
      * \brief Retrieves descriptor heap info
@@ -394,6 +437,12 @@ namespace dxvk {
      */
     DxvkSamplerDescriptorSet getDescriptorSetInfo() const {
       return m_descriptorHeap.getDescriptorSetInfo();
+    }
+
+    Rc<DxvkSamplerDescriptorSnapshot> createDescriptorSnapshot(
+            std::vector<Rc<DxvkSampler>> samplers) const {
+      samplers.push_back(m_default);
+      return m_descriptorHeap.createDescriptorSnapshot(std::move(samplers));
     }
 
     /**

@@ -927,8 +927,11 @@ namespace dxvk {
       ENABLE_FEATURE(vk12, shaderStorageImageArrayNonUniformIndexing, false),
       ENABLE_FEATURE(vk12, shaderUniformTexelBufferArrayNonUniformIndexing, false),
       ENABLE_FEATURE(vk12, shaderStorageTexelBufferArrayNonUniformIndexing, false),
-      ENABLE_FEATURE(vk12, descriptorBindingSampledImageUpdateAfterBind, true),
-      ENABLE_FEATURE(vk12, descriptorBindingUpdateUnusedWhilePending, true),
+      /* The private record-only translator snapshots its sampler-only set into
+       * a submission-owned immutable pool. A7 therefore remains free to
+       * withhold the broader update-after-bind resource semantics. */
+      ENABLE_FEATURE(vk12, descriptorBindingSampledImageUpdateAfterBind, !m_recordOnlyDirect),
+      ENABLE_FEATURE(vk12, descriptorBindingUpdateUnusedWhilePending, !m_recordOnlyDirect),
       ENABLE_FEATURE(vk12, descriptorBindingPartiallyBound, true),
       ENABLE_FEATURE(vk12, drawIndirectCount, false),
       ENABLE_FEATURE(vk12, hostQueryReset, true),
@@ -1108,8 +1111,10 @@ namespace dxvk {
       /* Untyped pointers, dependency for descriptor heaps */
       ENABLE_EXT_FEATURE(khrShaderUntypedPointers, shaderUntypedPointers, false),
 
-      /* Swapchain, needed for presentation */
-      ENABLE_EXT(khrSwapchain, true),
+      /* Generic DXVK presents through Vulkan WSI. The private record-only UMD
+       * sits below DXGI and presents through its DXGI DDI/A5 ownership path,
+       * so requiring or enabling a Vulkan swapchain would be a false edge. */
+      ENABLE_EXT(khrSwapchain, !m_recordOnlyDirect),
 
       /* Swapchain maintenance, used to implement proper synchronization
        * and dynamic present modes to avoid swapchain recreation */

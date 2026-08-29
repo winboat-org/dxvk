@@ -1243,7 +1243,8 @@ namespace dxvk {
     Rc<DxvkResourceAllocation> createImageResource(
       const VkImageCreateInfo&          createInfo,
       const DxvkAllocationInfo&         allocationInfo,
-      const void*                       next);
+      const void*                       next,
+            VkImage                     precreatedImage = VK_NULL_HANDLE);
 
     /**
      * \brief Creates allocation for sparse binding

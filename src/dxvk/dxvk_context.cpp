@@ -6734,7 +6734,8 @@ namespace dxvk {
     if (!m_features.test(DxvkContextFeature::DescriptorHeap)) {
       // Bind global sampler set if needed and if the previous pipeline did not use it
       if (newLayout->usesSamplerHeap())
-        updateSamplerSet<VK_PIPELINE_BIND_POINT_COMPUTE>(newLayout);
+        updateSamplerSet<VK_PIPELINE_BIND_POINT_COMPUTE>(
+          newPipeline->getLayout(), newLayout);
     }
 
     m_flags.clr(DxvkContextFlag::CpDirtyPipelineState);
@@ -6950,7 +6951,8 @@ namespace dxvk {
       // If the new pipeline uses the global sampler set when the
       // previous one didn't, re-bind it to the static set index 0.
       if (layout->usesSamplerHeap())
-        updateSamplerSet<VK_PIPELINE_BIND_POINT_GRAPHICS>(layout);
+        updateSamplerSet<VK_PIPELINE_BIND_POINT_GRAPHICS>(
+          m_state.gp.pipeline->getLayout(), layout);
     }
 
     m_flags.clr(DxvkContextFlag::GpDirtyPipelineState);
@@ -7019,7 +7021,9 @@ namespace dxvk {
   }
 
   template<VkPipelineBindPoint BindPoint>
-  void DxvkContext::updateSamplerSet(const DxvkPipelineLayout* layout) {
+  void DxvkContext::updateSamplerSet(
+    const DxvkPipelineBindings* bindings,
+    const DxvkPipelineLayout*   layout) {
     if (m_features.test(DxvkContextFeature::DescriptorBuffer)) {
       const uint32_t     bufferIndex = 0u;
       const VkDeviceSize bufferOffset = 0u;
@@ -7034,7 +7038,27 @@ namespace dxvk {
 
       m_cmd->cmdSetDescriptorBufferOffsetsEXT(DxvkCmdBuffer::ExecBuffer, &bindInfo);
     } else {
-      VkDescriptorSet set = m_device->getSamplerDescriptorSet().set;
+      VkDescriptorSet set = VK_NULL_HANDLE;
+
+      if (m_device->instance()->isRecordOnlyDirect()) {
+        std::vector<Rc<DxvkSampler>> samplers;
+        auto range = bindings->getSamplers(getActivePipelineLayoutType(BindPoint));
+        samplers.reserve(range.bindingCount);
+
+        for (uint32_t i = 0u; i < range.bindingCount; i++) {
+          const auto& sampler = this->getSampler(
+            range.bindings[i].getResourceIndex());
+          if (sampler)
+            samplers.push_back(sampler);
+        }
+
+        auto snapshot = m_device->createSamplerDescriptorSnapshot(
+          std::move(samplers));
+        set = snapshot->set();
+        m_cmd->track(std::move(snapshot));
+      } else {
+        set = m_device->getSamplerDescriptorSet().set;
+      }
 
       VkBindDescriptorSetsInfo bindInfo = { VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO };
       bindInfo.stageFlags = layout->getShaderStageMask();
@@ -7344,7 +7368,7 @@ namespace dxvk {
 
       if (Model != DxvkBindingModel::DescriptorHeap) {
         if (pipelineLayout->usesSamplerHeap())
-          updateSamplerSet<BindPoint>(pipelineLayout);
+          updateSamplerSet<BindPoint>(layout, pipelineLayout);
       }
 
       dirtySetMask = layout->getDirtySetMask(pipelineLayoutType, m_descriptorState);
@@ -7559,6 +7583,13 @@ namespace dxvk {
     }
 
     if (m_descriptorState.hasDirtySamplers(layout->getNonemptyStageMask())) {
+      const auto* pipelineLayout = layout->getLayout(pipelineLayoutType);
+      if (m_device->instance()->isRecordOnlyDirect()
+       && !m_features.test(DxvkContextFeature::DescriptorHeap)
+       && !m_features.test(DxvkContextFeature::DescriptorBuffer)
+       && pipelineLayout->usesSamplerHeap())
+        updateSamplerSet<BindPoint>(layout, pipelineLayout);
+
       auto range = layout->getSamplers(pipelineLayoutType);
 
       if (range.bindingCount)

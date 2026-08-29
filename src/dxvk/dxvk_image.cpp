@@ -135,7 +135,8 @@ namespace dxvk {
           DxvkDevice*           device,
     const DxvkImageCreateInfo&  createInfo,
           DxvkMemoryAllocator&  allocator,
-          VkMemoryPropertyFlags memFlags)
+          VkMemoryPropertyFlags memFlags,
+          VkImage               precreatedImage)
   : DxvkPagedResource(allocator),
     m_vkd           (device->vkd()),
     m_properties    (memFlags),
@@ -174,7 +175,7 @@ namespace dxvk {
     m_globalLayout = (m_info.sharing.mode != DxvkSharedHandleMode::Import)
       ? m_info.initialLayout : m_info.layout;
 
-    assignStorage(allocateStorage());
+    assignStorage(allocateStorage(precreatedImage));
 
     // Helios: createImageResource returns null (rather than throwing) when the
     // backing memory allocation fails — e.g. the venus/host side refusing the
@@ -303,14 +304,17 @@ namespace dxvk {
   }
 
 
-  Rc<DxvkResourceAllocation> DxvkImage::allocateStorage() {
-    return allocateStorageWithUsage(DxvkImageUsageInfo(), 0u);
+  Rc<DxvkResourceAllocation> DxvkImage::allocateStorage(
+          VkImage                     precreatedImage) {
+    return allocateStorageWithUsage(
+      DxvkImageUsageInfo(), 0u, precreatedImage);
   }
 
 
   Rc<DxvkResourceAllocation> DxvkImage::allocateStorageWithUsage(
     const DxvkImageUsageInfo&         usageInfo,
-          DxvkAllocationModes         mode) {
+          DxvkAllocationModes         mode,
+          VkImage                     precreatedImage) {
     const DxvkFormatInfo* formatInfo = lookupFormatInfo(m_info.format);
     small_vector<VkFormat, 4> localViewFormats;
 
@@ -391,7 +395,7 @@ namespace dxvk {
     }
 
     return m_allocator->createImageResource(
-      imageInfo, allocationInfo, sharedMemoryInfo);
+      imageInfo, allocationInfo, sharedMemoryInfo, precreatedImage);
   }
 
   Rc<DxvkResourceAllocation> DxvkImage::assignStorage(

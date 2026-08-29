@@ -196,7 +196,13 @@ namespace dxvk {
     // If necessary, create the mapped linear buffer
     uint32_t subresourceCount = m_desc.ArraySize * m_desc.MipLevels;
 
-    if (m_mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_NONE) {
+    const bool requirementsOnly = pHeliosCreate
+      && pHeliosCreate->MemoryRequirements
+      && pHeliosCreate->PrecreatedImage
+      && !*pHeliosCreate->PrecreatedImage;
+
+    if (!requirementsOnly
+     && m_mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_NONE) {
       m_mapInfo.resize(subresourceCount);
 
       for (uint32_t i = 0; i < subresourceCount; i++) {
@@ -242,10 +248,29 @@ namespace dxvk {
         "\n  Flags:   ", std::hex, m_desc.MiscFlags));
     }
 
+    if (requirementsOnly) {
+      VkMemoryRequirements2 requirements = {
+        VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
+      VkImage image = m_device->GetDXVKDevice()
+        ->createImageForMemoryRequirements(imageInfo, requirements);
+      if (!image || !requirements.memoryRequirements.size)
+        throw DxvkError("D3D11: Failed to query texture memory requirements");
+      *pHeliosCreate->MemoryRequirements = requirements.memoryRequirements;
+      *pHeliosCreate->PrecreatedImage = image;
+      return;
+    }
+
     if (m_11on12.Resource != nullptr)
       vkImage = VkImage(m_11on12.VulkanHandle);
 
-    if (!vkImage)
+    VkImage precreatedImage = pHeliosCreate && pHeliosCreate->PrecreatedImage
+      ? std::exchange(*pHeliosCreate->PrecreatedImage, VK_NULL_HANDLE)
+      : VK_NULL_HANDLE;
+
+    if (precreatedImage)
+      m_image = m_device->GetDXVKDevice()->adoptImage(
+        imageInfo, precreatedImage, memoryProperties);
+    else if (!vkImage)
       m_image = m_device->GetDXVKDevice()->createImage(imageInfo, memoryProperties);
     else
       m_image = m_device->GetDXVKDevice()->importImage(imageInfo, vkImage, memoryProperties);

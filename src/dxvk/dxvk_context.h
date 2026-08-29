@@ -2046,7 +2046,9 @@ namespace dxvk {
     void invalidateState();
 
     template<VkPipelineBindPoint BindPoint>
-    void updateSamplerSet(const DxvkPipelineLayout* layout);
+    void updateSamplerSet(
+      const DxvkPipelineBindings* bindings,
+      const DxvkPipelineLayout*   layout);
 
     template<VkPipelineBindPoint BindPoint, bool AlwaysTrack>
     bool updateResourceBindings(const DxvkPipelineBindings* layout);

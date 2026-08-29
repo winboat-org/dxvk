@@ -82,6 +82,8 @@ namespace dxvk {
    */
   struct D3D11_HELIOS_CREATE_INFO {
     const HeliosResourceAssociationV1* ResourceAssociation = nullptr;
+    VkMemoryRequirements* MemoryRequirements = nullptr;
+    VkImage* PrecreatedImage = nullptr;
   };
 
 
