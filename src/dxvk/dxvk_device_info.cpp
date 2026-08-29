@@ -511,7 +511,13 @@ namespace dxvk {
      * DxvkMemoryAllocator::getBufferDeviceAddress is the only caller, and it
      * queries a buffer it has just bound, so the EXT-only unbound arm is not
      * actually exercised. */
-    m_featuresSupported.vk12.bufferDeviceAddressCaptureReplay = VK_FALSE;
+    /* ⚠ captureReplay is NOT cleared for record-only. The EXT arm this
+     * replaced kept it on (its ENABLE_EXT_FEATURE required it), and
+     * memory/mpo-flip-0x119 root-caused "silent-0 device addresses" to a
+     * renamed captureReplay feature bit — so it is load-bearing here, not
+     * cosmetic. Generic DXVK still drops it. */
+    if (!m_recordOnlyDirect)
+      m_featuresSupported.vk12.bufferDeviceAddressCaptureReplay = VK_FALSE;
     m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddress = VK_FALSE;
     m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressCaptureReplay = VK_FALSE;
     m_featuresSupported.extBufferDeviceAddress.bufferDeviceAddressMultiDevice = VK_FALSE;
@@ -920,7 +926,7 @@ namespace dxvk {
       ENABLE_FEATURE(vk11, storagePushConstant16, false),
 
       ENABLE_FEATURE(vk12, bufferDeviceAddress, true),
-      ENABLE_FEATURE(vk12, bufferDeviceAddressCaptureReplay, false),
+      ENABLE_FEATURE(vk12, bufferDeviceAddressCaptureReplay, m_recordOnlyDirect),
       ENABLE_FEATURE(vk12, descriptorIndexing, true),
       ENABLE_FEATURE(vk12, storageBuffer8BitAccess, true),
       ENABLE_FEATURE(vk12, storagePushConstant8, false),
