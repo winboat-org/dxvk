@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <algorithm>
 #include <iomanip>
 #include <set>
@@ -711,6 +712,15 @@ namespace dxvk {
   }
 
 
+  static bool heliosSingleQueue() {
+    static const bool enabled = [] {
+      const char* env = std::getenv("HELIOS_DXVK_SINGLE_QUEUE");
+      return !(env && env[0] == '0');
+    }();
+    return enabled;
+  }
+
+
   void DxvkDeviceCapabilities::enableQueues() {
     m_queueMapping.graphics.family = findQueueFamily(
       VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT,
@@ -732,6 +742,16 @@ namespace dxvk {
 
     if (m_queueMapping.transfer.family == VK_QUEUE_FAMILY_IGNORED)
       m_queueMapping.transfer.family = computeQueue;
+
+    // Helios record-only binds ONE translator context to ONE queue endpoint
+    // (vn_helios_direct_dispatch.c: a second context on an endpoint is
+    // refused), so a submit on any other queue fails helios_record_entry_gate
+    // and DxvkCommandList::submit's transfer-first early return then drops the
+    // whole command list. That is every uploadImageHw, i.e. every texture
+    // created from D3D11_SUBRESOURCE_DATA. HELIOS_DXVK_SINGLE_QUEUE=0 restores
+    // the dedicated transfer queue for A/B.
+    if (m_recordOnlyDirect && heliosSingleQueue())
+      m_queueMapping.transfer = m_queueMapping.graphics;
 
     // Prefer using the graphics queue as a sparse binding queue if possible
     auto& graphicsQueue = m_queuesAvailable[m_queueMapping.graphics.family].core;
