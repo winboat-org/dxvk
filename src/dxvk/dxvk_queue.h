@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -79,6 +80,13 @@ namespace dxvk {
    * \brief Submission queue
    */
   class DxvkSubmissionQueue {
+
+    /// Bound on the record-only join retry in \ref synchronizeUntil: ~256 ms
+    /// total, woken early by any other thread's submit. Long enough for a
+    /// transient hand-off, short enough that a genuine deadlock is still
+    /// reported promptly and no win32k caller is wedged waiting on it.
+    constexpr static uint32_t RecordOnlyJoinRetries = 32u;
+    constexpr static uint32_t RecordOnlyJoinWaitMs  = 8u;
 
   public:
     
@@ -168,14 +176,35 @@ namespace dxvk {
     template<typename Pred>
     void synchronizeUntil(const Pred& pred) {
       if (m_recordOnly) {
-        this->completeRecordOnlySubmissions();
+        // HELIOS 2026-08-31: a record-only join is one shot, so a predicate
+        // that is merely NOT YET satisfied — the thread holding the reference
+        // has not reached its own synchronous submit() — became a PERMANENT
+        // device loss. dwm died on it ~14 s into every session and composited
+        // nothing after, which is a black desktop. waitForResource's own
+        // comment already says this case is usually transient for a
+        // multi-threaded caller and that dwm recovers from it; the stock path
+        // recovers because it waits on m_finishCond, which a record-only
+        // submit notifies too. So wait for it, bounded, and only then fail.
+        for (uint32_t attempt = 0;; attempt++) {
+          this->completeRecordOnlySubmissions();
 
-        std::unique_lock<dxvk::mutex> lock(m_mutex);
-        if (!pred()) {
-          Logger::err("DxvkSubmissionQueue: record-only exact-context join left an unresolved wait");
-          m_lastError = VK_ERROR_DEVICE_LOST;
+          std::unique_lock<dxvk::mutex> lock(m_mutex);
+
+          if (pred()) {
+            if (attempt)
+              Logger::warn(str::format("DxvkSubmissionQueue: record-only join "
+                "resolved after ", attempt, " retries"));
+            return;
+          }
+
+          if (attempt >= RecordOnlyJoinRetries) {
+            Logger::err("DxvkSubmissionQueue: record-only exact-context join left an unresolved wait");
+            m_lastError = VK_ERROR_DEVICE_LOST;
+            return;
+          }
+
+          m_finishCond.wait_for(lock, std::chrono::milliseconds(RecordOnlyJoinWaitMs));
         }
-        return;
       }
 
       std::unique_lock<dxvk::mutex> lock(m_mutex);
