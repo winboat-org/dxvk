@@ -9,8 +9,17 @@ namespace dxvk {
     m_checkpoints   (device->getCheckpointBuffer()),
     m_callback      (callback),
     m_recordOnly    (device->instance()->isRecordOnlyDirect()) {
-    if (m_recordOnly)
+    if (m_recordOnly) {
+      // HELIOS D1: record-only mode spawns no submission threads, so nothing
+      // runs at idle — and the ICD's per-device pending object-command lane
+      // (deferred view creates / descriptor updates) drains only on real
+      // queue submits. A device that defers without submitting fills the lane
+      // to its 8192 cap and the device dies (the start-menu freeze,
+      // 2026-09-01). This 1 Hz thread pushes an empty submit through the
+      // outer bracket; the ICD makes it a no-op when the lane is empty.
+      m_submitThread = dxvk::thread([this] () { recordOnlyFlushLoop(); });
       return;
+    }
 
     m_submitThread = dxvk::thread([this] () { submitCmdLists(); });
     m_finishThread = dxvk::thread([this] () { finishCmdLists(); });
@@ -36,6 +45,12 @@ namespace dxvk {
     auto vk = m_device->vkd();
 
     if (m_recordOnly) {
+      { std::unique_lock<dxvk::mutex> lock(m_mutex);
+        m_stopped.store(true);
+      }
+      m_appendCond.notify_all();
+      m_submitThread.join();
+
       // DxvkDevice normally joined before member destruction. Keep this
       // bounded fallback for constructor unwinds where no D3D11 object could
       // have submitted work yet.
@@ -265,6 +280,49 @@ namespace dxvk {
 
     m_device->m_objects.memoryManager().performTimedTasks();
     return result;
+  }
+
+
+  void DxvkSubmissionQueue::recordOnlyFlushLoop() {
+    env::setThreadName("dxvk-helios-flush");
+
+    while (true) {
+      { std::unique_lock<dxvk::mutex> lock(m_mutex);
+        m_appendCond.wait_for(lock, std::chrono::seconds(1));
+        if (m_stopped.load())
+          return;
+      }
+
+      if (m_lastError == VK_ERROR_DEVICE_LOST)
+        continue;
+
+      std::unique_lock<dxvk::mutex> queueLock(m_mutexQueue);
+
+      if (m_callback)
+        m_callback(true);
+
+      // Bounded proof-of-life: the flush is otherwise silent (empty lane =
+      // ICD no-op, empty scope closes abandoned), so log the first ticks.
+      static std::atomic<uint32_t> s_flushTicks = { 0u };
+      uint32_t tick = s_flushTicks.fetch_add(1u);
+      if (tick < 4u || (tick & 0x1FFu) == 0u)
+        Logger::info(str::format("Helios: idle object-lane flush tick ", tick));
+
+      void* outerScope = m_device->beginHeliosOuterSubmit();
+
+      if (outerScope) {
+        auto vk = m_device->vkd();
+        VkResult vr = vk->vkQueueSubmit2(
+          m_device->queues().graphics.queueHandle, 0, nullptr, VK_NULL_HANDLE);
+        vr = m_device->finishHeliosOuterSubmit(outerScope, vr);
+
+        if (vr != VK_SUCCESS)
+          Logger::warn(str::format("Helios: idle object-lane flush failed: ", vr));
+      }
+
+      if (m_callback)
+        m_callback(false);
+    }
   }
 
 

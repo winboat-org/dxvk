@@ -288,6 +288,8 @@ namespace dxvk {
 
     void submitCmdLists();
 
+    void recordOnlyFlushLoop();
+
     void finishCmdLists();
 
     VkResult completeRecordOnlySubmissions();
