@@ -68,8 +68,18 @@ namespace dxvk {
 
     }
 
-    if (pHeliosCreate && pHeliosCreate->ResourceAssociation)
+    if (pHeliosCreate && pHeliosCreate->ResourceAssociation) {
       imageInfo.heliosAssociation = *pHeliosCreate->ResourceAssociation;
+
+      // An OPENED WDDM allocation already holds the creator's pixels. Bind it
+      // as an import: no initializer clear, no UNDEFINED-layout transition.
+      // The bit is engine-side only and must not reach the ICD.
+      if (imageInfo.heliosAssociation.association_flags & HELIOS_RESOURCE_ASSOCIATION_FLAG_OPENED) {
+        imageInfo.heliosAssociation.association_flags &= ~HELIOS_RESOURCE_ASSOCIATION_FLAG_OPENED;
+        imageInfo.sharing.mode = DxvkSharedHandleMode::Import;
+        m_heliosOpened = true;
+      }
+    }
 
     if (!pDevice->GetOptions()->disableMsaa)
       DecodeSampleCount(m_desc.SampleDesc.Count, &imageInfo.sampleCount);

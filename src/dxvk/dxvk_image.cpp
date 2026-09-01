@@ -170,7 +170,11 @@ namespace dxvk {
 
     // Determine whether the image is shareable before creating the resource
     VkImageCreateInfo imageInfo = getImageCreateInfo(DxvkImageUsageInfo());
-    m_shared = canShareImage(device, imageInfo, m_info.sharing);
+    // A Helios outer association carries the WDDM identity itself; the Win32
+    // external-memory carriers are never used for it (see allocateStorage).
+    m_shared = m_info.heliosAssociation.outer_allocation_token
+      ? false
+      : canShareImage(device, imageInfo, m_info.sharing);
 
     m_globalLayout = (m_info.sharing.mode != DxvkSharedHandleMode::Import)
       ? m_info.initialLayout : m_info.layout;

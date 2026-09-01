@@ -260,6 +260,16 @@ namespace dxvk {
      * \brief The DXVK image
      * \returns The DXVK image
      */
+    /**
+     * \brief Whether this texture was OPENED (Helios association)
+     *
+     * Opened allocations already hold the creator's
+     * contents; the initializer must leave them alone.
+     */
+    bool IsHeliosOpened() const {
+      return m_heliosOpened;
+    }
+
     Rc<DxvkImage> GetImage() const {
       return m_image;
     }
@@ -593,6 +603,7 @@ namespace dxvk {
     D3D11_COMMON_TEXTURE_DESC     m_desc;
     D3D11_ON_12_RESOURCE_INFO     m_11on12;
     D3D11_COMMON_TEXTURE_MAP_MODE m_mapMode;
+    bool                          m_heliosOpened = false;
     DXGI_USAGE                    m_dxgiUsage;
     VkFormat                      m_packedFormat;
     

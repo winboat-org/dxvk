@@ -221,7 +221,8 @@ namespace dxvk {
     
     try {
       const Com<D3D11Texture1D> texture = new D3D11Texture1D(this, &desc, nullptr, pHeliosCreate);
-      m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
+      if (!texture->GetCommonTexture()->IsHeliosOpened())
+        m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
       *ppTexture1D = texture.ref();
       return S_OK;
     } catch (const DxvkError& e) {
@@ -408,7 +409,8 @@ namespace dxvk {
     
     try {
       Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &desc, nullptr, nullptr, pHeliosCreate);
-      m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
+      if (!texture->GetCommonTexture()->IsHeliosOpened())
+        m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
       *ppTexture2D = texture.ref();
       return S_OK;
     } catch (const DxvkError& e) {
@@ -526,7 +528,8 @@ namespace dxvk {
       
     try {
       Com<D3D11Texture3D> texture = new D3D11Texture3D(this, &desc, nullptr, pHeliosCreate);
-      m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
+      if (!texture->GetCommonTexture()->IsHeliosOpened())
+        m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
       *ppTexture3D = texture.ref();
       return S_OK;
     } catch (const DxvkError& e) {
