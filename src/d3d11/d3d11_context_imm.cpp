@@ -110,7 +110,16 @@ namespace dxvk {
       if (unlikely(m_device->debugFlags().test(DxvkDebugFlag::Capture)))
         m_flushReason = "Query read-back";
 
-      ConsiderFlush(GpuFlushType::ImplicitSynchronization);
+      // HELIOS record-only: the tracker's pending-submission count only
+      // advances on a join, so after a few flushes it refuses every
+      // synchronization flush and a query spin never submits its chunk
+      // (tools/d3d11_event_query_probe: unflushed poll timed out, 2026-09-03).
+      // ExecuteFlush is a no-op without pending chunks, so this costs one
+      // submission per spin, not one per poll.
+      if (m_device->instance()->isRecordOnlyDirect())
+        ExecuteFlush(GpuFlushType::ImplicitSynchronization, nullptr, false);
+      else
+        ConsiderFlush(GpuFlushType::ImplicitSynchronization);
     }
     
     return hr;
