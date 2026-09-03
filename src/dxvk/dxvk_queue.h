@@ -295,6 +295,10 @@ namespace dxvk {
     VkResult completeRecordOnlySubmissions();
 
     VkResult completeRecordOnlySubmissionsLocked();
+
+    void completeRecordOnlyEntriesLocked(
+            VkResult                  result,
+            size_t                    maxEntries);
     
   };
   

@@ -916,13 +916,24 @@ namespace dxvk {
   }
 
 
-  void DxvkDevice::waitForFence(sync::Fence& fence, uint64_t value) {
+  void DxvkDevice::waitForFence(sync::Signal& fence, uint64_t value) {
     if (fence.value() >= value)
       return;
 
     auto t0 = dxvk::high_resolution_clock::now();
 
-    fence.wait(value);
+    // HELIOS record-only: a sync::Fence is signalled from notifyObjects(),
+    // which only runs when the finish queue is drained by an exact HQC1 join
+    // (capacity pressure, waitForIdle, teardown). A bare wait with nothing
+    // else draining never returns: 3DMark's loading sat in the initializer's
+    // staging throttle forever (2026-09-03). Drain until satisfied, bounded.
+    if (m_instance->isRecordOnlyDirect()) {
+      m_submissionQueue.synchronizeUntil([&fence, value] {
+        return fence.value() >= value;
+      });
+    } else {
+      fence.wait(value);
+    }
 
     auto t1 = dxvk::high_resolution_clock::now();
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);

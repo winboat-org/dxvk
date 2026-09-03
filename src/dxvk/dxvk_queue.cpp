@@ -132,6 +132,8 @@ namespace dxvk {
           m_finishQueue.push(std::move(entry));
         m_submitCond.notify_all();
         m_finishCond.notify_all();
+        // Wake the flush thread: it retires this list once the host is done.
+        m_appendCond.notify_one();
       }
 
       m_device->m_objects.memoryManager().performTimedTasks();
@@ -250,7 +252,16 @@ namespace dxvk {
     if (result != VK_SUCCESS)
       m_lastError = result;
 
-    while (true) {
+    completeRecordOnlyEntriesLocked(result, ~size_t(0));
+    m_device->m_objects.memoryManager().performTimedTasks();
+    return result;
+  }
+
+
+  void DxvkSubmissionQueue::completeRecordOnlyEntriesLocked(
+          VkResult                  result,
+          size_t                    maxEntries) {
+    while (maxEntries--) {
       DxvkSubmitEntry entry = { };
 
       {
@@ -277,9 +288,6 @@ namespace dxvk {
         m_leakedCmdLists.push_back(std::move(entry.submit.cmdList));
       }
     }
-
-    m_device->m_objects.memoryManager().performTimedTasks();
-    return result;
   }
 
 
@@ -296,32 +304,57 @@ namespace dxvk {
       if (m_lastError == VK_ERROR_DEVICE_LOST)
         continue;
 
-      std::unique_lock<dxvk::mutex> queueLock(m_mutexQueue);
+      size_t pending = 0;
 
-      if (m_callback)
-        m_callback(true);
+      {
+        std::unique_lock<dxvk::mutex> queueLock(m_mutexQueue);
 
-      // Bounded proof-of-life: the flush is otherwise silent (empty lane =
-      // ICD no-op, empty scope closes abandoned), so log the first ticks.
-      static std::atomic<uint32_t> s_flushTicks = { 0u };
-      uint32_t tick = s_flushTicks.fetch_add(1u);
-      if (tick < 4u || (tick & 0x1FFu) == 0u)
-        Logger::info(str::format("Helios: idle object-lane flush tick ", tick));
+        if (m_callback)
+          m_callback(true);
 
-      void* outerScope = m_device->beginHeliosOuterSubmit();
+        // Bounded proof-of-life: the flush is otherwise silent (empty lane =
+        // ICD no-op, empty scope closes abandoned), so log the first ticks.
+        static std::atomic<uint32_t> s_flushTicks = { 0u };
+        uint32_t tick = s_flushTicks.fetch_add(1u);
+        if (tick < 4u || (tick & 0x1FFu) == 0u)
+          Logger::info(str::format("Helios: idle object-lane flush tick ", tick));
 
-      if (outerScope) {
-        auto vk = m_device->vkd();
-        VkResult vr = vk->vkQueueSubmit2(
-          m_device->queues().graphics.queueHandle, 0, nullptr, VK_NULL_HANDLE);
-        vr = m_device->finishHeliosOuterSubmit(outerScope, vr);
+        void* outerScope = m_device->beginHeliosOuterSubmit();
 
-        if (vr != VK_SUCCESS)
-          Logger::warn(str::format("Helios: idle object-lane flush failed: ", vr));
+        if (outerScope) {
+          auto vk = m_device->vkd();
+          VkResult vr = vk->vkQueueSubmit2(
+            m_device->queues().graphics.queueHandle, 0, nullptr, VK_NULL_HANDLE);
+          vr = m_device->finishHeliosOuterSubmit(outerScope, vr);
+
+          if (vr != VK_SUCCESS)
+            Logger::warn(str::format("Helios: idle object-lane flush failed: ", vr));
+        }
+
+        if (m_callback)
+          m_callback(false);
+
+        std::unique_lock<dxvk::mutex> lock(m_mutex);
+        pending = m_finishQueue.size();
       }
 
-      if (m_callback)
-        m_callback(false);
+      // Retire what the host has finished. Every sync::Signal (the D3D11
+      // initializer's staging throttle among them) rides the finish queue,
+      // and record-only otherwise drains it only at capacity (32 lists) or on
+      // an explicit idle wait: Fire Strike's loader stalled at 144 MB of
+      // uploads after three submissions (2026-09-03). The join runs without
+      // the queue lock so app submits keep flowing; only the lists queued
+      // before the join are retired by it.
+      if (pending) {
+        VkResult result = m_device->joinHeliosOuterSubmit();
+
+        if (result != VK_SUCCESS)
+          m_lastError = result;
+
+        std::unique_lock<dxvk::mutex> queueLock(m_mutexQueue);
+        completeRecordOnlyEntriesLocked(result, pending);
+        m_device->m_objects.memoryManager().performTimedTasks();
+      }
     }
   }
 

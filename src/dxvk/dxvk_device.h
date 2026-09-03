@@ -843,7 +843,7 @@ namespace dxvk {
      * \param [in] fence Fence to wait on
      * \param [in] value Fence value
      */
-    void waitForFence(sync::Fence& fence, uint64_t value);
+    void waitForFence(sync::Signal& fence, uint64_t value);
 
     /**
      * \brief Waits for resource to become idle
