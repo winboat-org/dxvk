@@ -46,6 +46,9 @@ namespace dxvk {
       m_allocator->unregisterResource(this);
       throw DxvkError("DxvkBuffer: failed to allocate backing storage");
     }
+
+    if (m_info.heliosAssociation.outer_allocation_token)
+      m_heliosOuterStorage = m_storage;
   }
 
 
@@ -81,6 +84,9 @@ namespace dxvk {
       m_allocator->unregisterResource(this);
       throw DxvkError("DxvkBuffer: failed to import backing storage");
     }
+
+    if (m_info.heliosAssociation.outer_allocation_token)
+      m_heliosOuterStorage = m_storage;
   }
 
 

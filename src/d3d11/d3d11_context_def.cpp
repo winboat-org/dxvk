@@ -369,20 +369,9 @@ namespace dxvk {
       return E_INVALIDARG;
     }
 
-    const bool exactOuterAllocation =
-      pBuffer->GetBuffer()->info().heliosAssociation.outer_allocation_token != 0u;
-    if (exactOuterAllocation) {
-      auto bufferSlice = AllocStagingBuffer(pBuffer->Desc()->ByteWidth);
-      pMappedResource->pData = bufferSlice.mapPtr(0);
-      EmitCs([
-        cDstBuffer = pBuffer->GetBuffer(),
-        cSrcSlice  = std::move(bufferSlice)
-      ] (DxvkContext* ctx) {
-        ctx->copyBuffer(
-          cDstBuffer, 0u,
-          cSrcSlice.buffer(), cSrcSlice.offset(), cSrcSlice.length());
-      });
-    } else {
+    // Helios: outer-associated buffers rename like any other (the exact outer
+    // allocation is pinned by DxvkBuffer), so no staging copy per map.
+    {
       auto bufferSlice = pBuffer->AllocSlice(&m_allocationCache);
       pMappedResource->pData = bufferSlice->mapPtr();
       EmitCs([

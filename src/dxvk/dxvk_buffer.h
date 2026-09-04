@@ -289,9 +289,12 @@ namespace dxvk {
       allocationInfo.properties = m_properties;
 
       HeliosResourceAssociationV1 association = m_info.heliosAssociation;
-      if (association.outer_allocation_token) {
-        // The UMD supplies a root record. Each backing allocation receives its
-        // own immutable copy so buffer renaming cannot retain a caller pointer.
+      if (association.outer_allocation_token && m_storage == nullptr) {
+        // Only the FIRST storage is the exact outer allocation; the ctor pins
+        // it in m_heliosOuterStorage. A later rename (WRITE_DISCARD) gets a
+        // plain pooled slice: renaming to a second dedicated import of the
+        // same token was the reason MapBuffer joined the host per map instead
+        // (Fire Strike GT1: 0.8 fps, 2026-09-04).
         association.p_next = nullptr;
         allocationInfo.forceDedicated = true;
         allocationInfo.heliosAssociation = &association;
@@ -440,6 +443,9 @@ namespace dxvk {
     DxvkResourceBufferInfo      m_bufferInfo    = { };
 
     Rc<DxvkResourceAllocation>  m_storage;
+    // The exact outer (WDDM-associated) allocation, held for the buffer's
+    // lifetime so a rename never retires the UMD's resource identity early.
+    Rc<DxvkResourceAllocation>  m_heliosOuterStorage;
 
     dxvk::mutex                 m_viewMutex;
     std::unordered_map<DxvkBufferViewKey,

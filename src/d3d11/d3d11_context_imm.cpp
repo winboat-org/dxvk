@@ -477,23 +477,10 @@ namespace dxvk {
     VkDeviceSize bufferSize = pResource->Desc()->ByteWidth;
 
     if (likely(MapType == D3D11_MAP_WRITE_DISCARD)) {
-      auto buffer = pResource->GetBuffer();
-
-      // One outer WDDM allocation owns one immutable association and therefore
-      // one exact Mesa allocation. Reusing the current backing after the exact
-      // outer-context join preserves WRITE_DISCARD semantics without creating
-      // a second VkDeviceMemory carrying the same token.
-      if (unlikely(buffer->info().heliosAssociation.outer_allocation_token)) {
-        if (!WaitForResource(*buffer, pResource->GetSequenceNumber(), MapType, MapFlags)) {
-          pMappedResource->pData = nullptr;
-          return DXGI_ERROR_WAS_STILL_DRAWING;
-        }
-
-        pMappedResource->pData      = pResource->GetMapPtr();
-        pMappedResource->RowPitch   = bufferSize;
-        pMappedResource->DepthPitch = bufferSize;
-        return S_OK;
-      }
+      // Helios: an outer-associated buffer renames like any other. Its exact
+      // outer allocation stays pinned in DxvkBuffer (m_heliosOuterStorage) and
+      // the new slice is a pooled one, so no second VkDeviceMemory carries the
+      // token. Joining the host here instead cost Fire Strike GT1 ~1 s/frame.
 
       // Allocate a new backing slice for the buffer and set
       // it as the 'new' mapped slice. This assumes that the
