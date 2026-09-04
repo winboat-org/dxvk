@@ -4,7 +4,7 @@
 #include <map>
 #include <memory>
 
-#include <helios_resource_association.h>
+#include <helios_protocol.h>
 
 #include "dxvk_access.h"
 #include "dxvk_adapter.h"

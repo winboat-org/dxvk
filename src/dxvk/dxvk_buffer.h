@@ -3,7 +3,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <helios_resource_association.h>
+#include <helios_protocol.h>
 
 #include "dxvk_descriptor_pool.h"
 #include "dxvk_format.h"
