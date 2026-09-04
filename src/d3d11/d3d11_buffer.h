@@ -126,7 +126,11 @@ namespace dxvk {
     
     Rc<DxvkResourceAllocation> DiscardSlice(DxvkLocalAllocationCache* cache) {
       auto allocation = m_buffer->allocateStorage(cache);
-      m_mapPtr = allocation->mapPtr();
+      // Helios: a refused allocation is null, not a throw. The caller fails
+      // the map and keeps the old slice; this inlined deref was the actual
+      // GT2 crash site (MapBuffer+0x163, 2026-09-04), not MapBuffer's check.
+      if (likely(allocation != nullptr))
+        m_mapPtr = allocation->mapPtr();
       return allocation;
     }
 

@@ -548,6 +548,13 @@ namespace dxvk {
         auto srcPtr = pResource->GetMapPtr();
 
         auto dstSlice = pResource->DiscardSlice(nullptr);
+
+        if (unlikely(dstSlice == nullptr)) {
+          Logger::err("D3D11: MapBuffer: preserve slice allocation failed");
+          pMappedResource->pData = nullptr;
+          return E_OUTOFMEMORY;
+        }
+
         auto dstPtr = dstSlice->mapPtr();
 
         EmitCs([
