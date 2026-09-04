@@ -134,6 +134,11 @@ namespace dxvk {
       const D3D11_BUFFER_DESC*      pDesc,
             VkMemoryRequirements*  pRequirements);
 
+    HRESULT PrepareTexture3DHelios(
+      const D3D11_TEXTURE3D_DESC*   pDesc,
+            VkMemoryRequirements*  pRequirements,
+            VkImage*                pImage);
+
     void DiscardTexture2DHeliosPreflight(
             VkImage                 image);
     

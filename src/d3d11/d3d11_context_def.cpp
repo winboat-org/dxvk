@@ -373,6 +373,13 @@ namespace dxvk {
     // allocation is pinned by DxvkBuffer), so no staging copy per map.
     {
       auto bufferSlice = pBuffer->AllocSlice(&m_allocationCache);
+
+      if (unlikely(bufferSlice == nullptr)) {
+        Logger::err("D3D11: deferred MapBuffer: slice allocation failed");
+        pMappedResource->pData = nullptr;
+        return E_OUTOFMEMORY;
+      }
+
       pMappedResource->pData = bufferSlice->mapPtr();
       EmitCs([
         cDstBuffer = pBuffer->GetBuffer(),

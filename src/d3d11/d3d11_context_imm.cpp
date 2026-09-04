@@ -486,6 +486,16 @@ namespace dxvk {
       // it as the 'new' mapped slice. This assumes that the
       // only way to invalidate a buffer is by mapping it.
       auto bufferSlice = pResource->DiscardSlice(&m_allocationCache);
+
+      // Helios: createBufferResource returns null instead of throwing when
+      // the backing allocation is refused; Fire Strike GT2 crashed here on
+      // the null slice (2026-09-04). Fail the map, keep the old slice.
+      if (unlikely(bufferSlice == nullptr)) {
+        Logger::err("D3D11: MapBuffer: discard slice allocation failed");
+        pMappedResource->pData = nullptr;
+        return E_OUTOFMEMORY;
+      }
+
       pMappedResource->pData      = bufferSlice->mapPtr();
       pMappedResource->RowPitch   = bufferSize;
       pMappedResource->DepthPitch = bufferSize;
@@ -896,6 +906,12 @@ namespace dxvk {
 
     if (likely(CopyFlags != D3D11_COPY_NO_OVERWRITE)) {
       auto bufferSlice = pDstBuffer->DiscardSlice(&m_allocationCache);
+
+      if (unlikely(bufferSlice == nullptr)) {
+        Logger::err("D3D11: UpdateBuffer: discard slice allocation failed");
+        return;
+      }
+
       mapPtr = bufferSlice->mapPtr();
 
       EmitCs([

@@ -357,6 +357,49 @@ namespace dxvk {
   }
 
 
+  HRESULT D3D11Device::PrepareTexture3DHelios(
+    const D3D11_TEXTURE3D_DESC*   pDesc,
+          VkMemoryRequirements*  pRequirements,
+          VkImage*                pImage) {
+    if (!pDesc || !pRequirements || !pImage || *pImage)
+      return E_INVALIDARG;
+
+    // Same exact-lower-image sizing as the 2D preflight: the linear estimate
+    // undersized a 128x43x43 RGBA16F volume by 20% and the association
+    // re-validate refused it (Fire Strike GT2 init, 2026-09-04).
+    D3D11_COMMON_TEXTURE_DESC desc = { };
+    desc.Width = pDesc->Width;
+    desc.Height = pDesc->Height;
+    desc.Depth = pDesc->Depth;
+    desc.MipLevels = pDesc->MipLevels;
+    desc.ArraySize = 1;
+    desc.Format = pDesc->Format;
+    desc.SampleDesc = { 1, 0 };
+    desc.Usage = pDesc->Usage;
+    desc.BindFlags = pDesc->BindFlags;
+    desc.CPUAccessFlags = pDesc->CPUAccessFlags;
+    desc.MiscFlags = pDesc->MiscFlags;
+    desc.TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
+
+    HRESULT hr = D3D11CommonTexture::NormalizeTextureProperties(&desc);
+    if (FAILED(hr))
+      return hr;
+
+    *pRequirements = { };
+    D3D11_HELIOS_CREATE_INFO query = { };
+    query.MemoryRequirements = pRequirements;
+    query.PrecreatedImage = pImage;
+    try {
+      D3D11CommonTexture texture(nullptr, this, &desc, nullptr,
+        D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, VK_NULL_HANDLE, nullptr, &query);
+      return pRequirements->size && *pImage ? S_OK : E_FAIL;
+    } catch (const DxvkError& e) {
+      Logger::err(e.message());
+      return E_INVALIDARG;
+    }
+  }
+
+
   void D3D11Device::DiscardTexture2DHeliosPreflight(
           VkImage                 image) {
     GetDXVKDevice()->destroyImageForMemoryRequirements(image);
