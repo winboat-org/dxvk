@@ -293,8 +293,31 @@ namespace dxvk {
     if (!m_device->instance()->isRecordOnlyDirect() || !m_legacy.setLayout)
       throw DxvkError("Immutable sampler snapshots require a record-only legacy descriptor layout");
 
-    return new DxvkSamplerDescriptorSnapshot(
+    std::vector<uint64_t> key;
+    key.reserve(samplers.size() * 2u);
+
+    for (const auto& sampler : samplers) {
+      if (!sampler)
+        continue;
+      const auto descriptor = sampler->getDescriptor();
+      key.push_back(descriptor.samplerIndex);
+      key.push_back(reinterpret_cast<uint64_t>(descriptor.samplerObject));
+    }
+
+    std::lock_guard lock(m_snapshotMutex);
+
+    auto entry = m_snapshotCache.find(key);
+    if (entry != m_snapshotCache.end())
+      return entry->second;
+
+    // The cached Rc keeps each snapshot's samplers alive; bound that.
+    if (m_snapshotCache.size() >= 2048u)
+      m_snapshotCache.clear();
+
+    Rc<DxvkSamplerDescriptorSnapshot> snapshot = new DxvkSamplerDescriptorSnapshot(
       m_device, m_legacy.setLayout, m_descriptorCount, std::move(samplers));
+    m_snapshotCache.emplace(std::move(key), snapshot);
+    return snapshot;
   }
 
 

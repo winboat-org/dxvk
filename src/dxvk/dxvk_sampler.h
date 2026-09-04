@@ -354,6 +354,12 @@ namespace dxvk {
     DxvkDevice* m_device          = nullptr;
     uint32_t    m_descriptorCount = 0u;
 
+    // Helios record-only: a snapshot is a pure function of the bound
+    // (index, VkSampler) pairs, so reuse it. Building one per sampler-set
+    // update was two synchronous KMD submissions per draw (GT1: 0.25 fps).
+    mutable dxvk::mutex m_snapshotMutex;
+    mutable std::map<std::vector<uint64_t>, Rc<DxvkSamplerDescriptorSnapshot>> m_snapshotCache;
+
     struct {
       VkDescriptorPool      pool      = VK_NULL_HANDLE;
       VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
