@@ -289,12 +289,15 @@ namespace dxvk {
       allocationInfo.properties = m_properties;
 
       HeliosResourceAssociationV1 association = m_info.heliosAssociation;
-      if (association.outer_allocation_token && m_storage == nullptr) {
-        // Only the FIRST storage is the exact outer allocation; the ctor pins
-        // it in m_heliosOuterStorage. A later rename (WRITE_DISCARD) gets a
-        // plain pooled slice: renaming to a second dedicated import of the
-        // same token was the reason MapBuffer joined the host per map instead
-        // (Fire Strike GT1: 0.8 fps, 2026-09-04).
+      // Only the FIRST storage is the exact outer allocation; the ctor pins it
+      // in m_heliosOuterStorage, which nothing writes afterwards. m_storage is
+      // NOT the test: the CS thread's assignStorage moves it out before
+      // assigning the rename slice, and a WRITE_DISCARD map landing in that
+      // window re-issued the association -> the ICD refused the duplicate
+      // token (VK_ERROR_VALIDATION_FAILED_EXT) -> Fire Strike GT2's map
+      // failed 1.5 s into its work once ring batching made the CS thread
+      // fast enough to race (2026-09-04).
+      if (association.outer_allocation_token && m_heliosOuterStorage == nullptr) {
         association.p_next = nullptr;
         allocationInfo.forceDedicated = true;
         allocationInfo.heliosAssociation = &association;
