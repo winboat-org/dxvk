@@ -1174,10 +1174,20 @@ namespace dxvk {
     ] (DxvkContext* ctx) {
       const VkImageSubresourceLayers layers =
         { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u };
-      ctx->copyImage(
-        cDstImage, layers, VkOffset3D { 0, 0, 0 },
-        cSrcImage, layers, VkOffset3D { 0, 0, 0 },
-        cExtent);
+      if (cDstImage->info().format == cSrcImage->info().format) {
+        ctx->copyImage(
+          cDstImage, layers, VkOffset3D { 0, 0, 0 },
+          cSrcImage, layers, VkOffset3D { 0, 0, 0 },
+          cExtent);
+      } else {
+        // A packed 10-bit direct primary cannot be published to the AR24
+        // scan-out contract as raw words. The snapshot ring is RGBA8 for that
+        // source, so force a numeric framebuffer conversion here.
+        ctx->copyImageConverted(
+          cDstImage, layers, VkOffset3D { 0, 0, 0 },
+          cSrcImage, layers, VkOffset3D { 0, 0, 0 },
+          cExtent);
+      }
     });
   }
 
@@ -1246,6 +1256,33 @@ namespace dxvk {
         cExtent);
     });
     return true;
+  }
+
+
+  void D3D11ImmediateContext::HeliosConvertImage(
+    const Rc<DxvkImage>&        DstImage,
+          VkImageSubresourceLayers DstSubresource,
+          VkOffset3D            DstOffset,
+    const Rc<DxvkImage>&        SrcImage,
+          VkImageSubresourceLayers SrcSubresource,
+          VkOffset3D            SrcOffset,
+          VkExtent3D            Extent) {
+    D3D10DeviceLock lock = LockContext();
+
+    EmitCs([
+      cDstImage       = DstImage,
+      cDstSubresource = DstSubresource,
+      cDstOffset      = DstOffset,
+      cSrcImage       = SrcImage,
+      cSrcSubresource = SrcSubresource,
+      cSrcOffset      = SrcOffset,
+      cExtent         = Extent
+    ] (DxvkContext* ctx) {
+      ctx->copyImageConverted(
+        cDstImage, cDstSubresource, cDstOffset,
+        cSrcImage, cSrcSubresource, cSrcOffset,
+        cExtent);
+    });
   }
 
 

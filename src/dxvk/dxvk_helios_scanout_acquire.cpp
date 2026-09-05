@@ -21,6 +21,19 @@ namespace dxvk {
     using PfnLookup   = bool     (__cdecl*)(uint32_t, uint64_t*, uint64_t*, uint64_t*);
     using PfnSnapshot = uint32_t (__cdecl*)(DxvkHeliosLedgerSlot*, uint32_t);
     using PfnResid    = uint32_t (__cdecl*)(VkDeviceMemory);
+    using PfnRegisterPresentBuffer = bool (__cdecl*)(VkDevice, VkSemaphore, uint64_t*);
+    using PfnClaimPresentBuffer = bool (__cdecl*)(VkDevice, VkSemaphore, uint32_t, uint32_t);
+
+    template<typename T>
+    static bool pinContainingModule(T address) {
+      HMODULE module = nullptr;
+      return address
+          && GetModuleHandleExW(
+              GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+            | GET_MODULE_HANDLE_EX_FLAG_PIN,
+              reinterpret_cast<LPCWSTR>(address),
+              &module);
+    }
 
     /* The three helios_scanout_* exports live in the module CONTAINING this
      * code (helios_umd.dll — dxvk is statically linked into it). They exist
@@ -91,10 +104,61 @@ namespace dxvk {
         CloseHandle(snapshot);
       }
 
-      if (fn)
+      /* The ICD may otherwise unload while the UMD remains alive, leaving the
+       * process-wide cache pointing into unmapped code. A successful lookup
+       * therefore pins the exact module containing the export before the
+       * function pointer is published. */
+      if (fn && pinContainingModule(reinterpret_cast<PfnResid>(fn)))
         s_cache.store(fn, std::memory_order_release);
+      else
+        fn = nullptr;
 
       return reinterpret_cast<PfnResid>(fn);
+    }
+
+    struct PresentBufferExports {
+      PfnRegisterPresentBuffer registerStream = nullptr;
+      PfnClaimPresentBuffer    claimRead      = nullptr;
+    };
+
+    static PresentBufferExports presentBufferExports() {
+      static std::atomic<void*> s_register = { nullptr };
+      static std::atomic<void*> s_claim = { nullptr };
+
+      PresentBufferExports result = {
+        reinterpret_cast<PfnRegisterPresentBuffer>(s_register.load(std::memory_order_acquire)),
+        reinterpret_cast<PfnClaimPresentBuffer>(s_claim.load(std::memory_order_acquire)),
+      };
+      if (result.registerStream && result.claimRead)
+        return result;
+
+      HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+      if (snapshot != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W module = { };
+        module.dwSize = sizeof(module);
+        if (Module32FirstW(snapshot, &module)) {
+          do {
+            auto registerFn = reinterpret_cast<PfnRegisterPresentBuffer>(
+              GetProcAddress(module.hModule, "helios_venus_register_present_stream"));
+            auto claimFn = reinterpret_cast<PfnClaimPresentBuffer>(
+              GetProcAddress(module.hModule, "helios_venus_claim_present_buffer_read"));
+            /* These pointers are cached for the UMD process lifetime. Pin the
+             * containing ICD before publishing them so device teardown cannot
+             * turn a later recreation into a call through stale addresses. */
+            if (registerFn && claimFn && pinContainingModule(registerFn)) {
+              result = { registerFn, claimFn };
+              break;
+            }
+          } while (Module32NextW(snapshot, &module));
+        }
+        CloseHandle(snapshot);
+      }
+
+      if (result.registerStream && result.claimRead) {
+        s_register.store(reinterpret_cast<void*>(result.registerStream), std::memory_order_release);
+        s_claim.store(reinterpret_cast<void*>(result.claimRead), std::memory_order_release);
+      }
+      return result;
     }
 
     bool enabled() {
@@ -124,6 +188,24 @@ namespace dxvk {
       return fn ? fn(memory) : 0u;
     }
 
+    bool registerPresentBufferStream(VkDevice device, VkSemaphore semaphore) {
+      auto exports = presentBufferExports();
+      uint64_t cookie = 0u;
+      return exports.registerStream
+          && exports.registerStream(device, semaphore, &cookie)
+          && cookie != 0u;
+    }
+
+    bool claimPresentBufferRead(
+            VkDevice device,
+            VkSemaphore semaphore,
+            uint32_t resid,
+            uint32_t value) {
+      auto exports = presentBufferExports();
+      return exports.claimRead
+          && exports.claimRead(device, semaphore, resid, value);
+    }
+
 #else
 
     /* Non-Windows build of the engine: no Helios UMD, no KMD ledger. */
@@ -131,6 +213,8 @@ namespace dxvk {
     bool ledgerLookupV2(uint32_t, uint64_t*, uint64_t*, uint64_t*) { return false; }
     uint32_t ledgerSnapshotV2(DxvkHeliosLedgerSlot*, uint32_t) { return 0u; }
     uint32_t residFromMemory(VkDeviceMemory) { return 0u; }
+    bool registerPresentBufferStream(VkDevice, VkSemaphore) { return false; }
+    bool claimPresentBufferRead(VkDevice, VkSemaphore, uint32_t, uint32_t) { return false; }
 
 #endif
 

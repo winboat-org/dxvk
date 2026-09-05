@@ -782,6 +782,24 @@ namespace dxvk {
             VkImageSubresourceLayers srcSubresource,
             VkOffset3D            srcOffset,
             VkExtent3D            extent);
+
+    /**
+     * \brief Numerically converts one color image region into another
+     *
+     * Unlike \ref copyImage, this creates native-format views and takes the
+     * numeric blit path. That distinction is load-bearing for DXGI Blt:
+     * equal-sized color formats are legal Vulkan copy-compatible formats,
+     * but a raw copy would preserve packed bits instead of converting values
+     * (for example R10G10B10A2 into RGBA8).
+     */
+    void copyImageConverted(
+      const Rc<DxvkImage>&        dstImage,
+            VkImageSubresourceLayers dstSubresource,
+            VkOffset3D            dstOffset,
+      const Rc<DxvkImage>&        srcImage,
+            VkImageSubresourceLayers srcSubresource,
+            VkOffset3D            srcOffset,
+            VkExtent3D            extent);
     
     /**
      * \brief Copies overlapping image region
@@ -1727,8 +1745,10 @@ namespace dxvk {
 
     /* Helios GDI staging: staged shared images sampled in the current command
      * list enroll into "touched"; end-of-list merges them into the PERSISTENT
-     * refresh set, which is copied (source -> private image) at EVERY list
-     * start until the surface goes idle. Persistence is load-bearing: with the
+     * refresh set, which is copied (source -> private image) at that list's tail
+     * immediately before submission until the surface goes idle. This prepares
+     * the private image for the next list without leaving ownership claims in a
+     * newly opened idle list. Persistence is load-bearing: with the
      * old touch->refresh-next-list-only model, any surface whose content
      * changed once and was then re-read exactly once (wallpaper, sidebars,
      * icons — one-shot draws) sampled the PRE-change bytes forever, and
@@ -1761,6 +1781,15 @@ namespace dxvk {
     // count onto a fresh surface.
     std::unordered_map<uint32_t, uint32_t>    m_heliosStagedProbeTicks;
     uint32_t                                  m_heliosStagedProbesIssued = 0u;
+
+    /* Dedicated Present-buffer ownership is per recording context. Command
+     * lists from one DxvkContext are enqueued in flush order, so timeline
+     * reservation order and Vulkan submission order are identical. A single
+     * device-global record-time counter would not have that property across
+     * independently recording contexts. */
+    Rc<DxvkFence>                             m_heliosPresentBufferFence;
+    uint32_t                                  m_heliosPresentBufferValue = 0u;
+    bool                                      m_heliosPresentBufferFailed = false;
 
     /* Helios WS1 #4 consumer-side present wait (dxvk.heliosPresentWaitUs).
      * The exact producer generation is (pid, process creation time, fence id).
@@ -1905,7 +1934,8 @@ namespace dxvk {
       const Rc<DxvkBuffer>&       buffer,
             VkDeviceSize          bufferOffset,
             VkDeviceSize          bufferRowAlignment,
-            VkDeviceSize          bufferSliceAlignment);
+            VkDeviceSize          bufferSliceAlignment,
+            bool                  heliosExternalOwnership);
 
     void copyBufferToImageFb(
       const Rc<DxvkImage>&        image,
@@ -2370,7 +2400,7 @@ namespace dxvk {
 
     void beginCurrentCommands();
 
-    void endCurrentCommands();
+    void endCurrentCommands(bool finalizingForSubmit = false);
 
     void splitCommands();
 
@@ -2435,6 +2465,9 @@ namespace dxvk {
             DxvkImage&                image);
 
     void refreshHeliosStagedImages();
+
+    bool claimHeliosPresentBufferRead(
+      uint32_t resid, Rc<DxvkFence>& batchFence, uint64_t& batchValue);
 
     void heliosPresentWaitBeforeRefresh(
       const Rc<DxvkImage>&      image);

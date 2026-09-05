@@ -1469,14 +1469,17 @@ namespace dxvk {
       return nullptr;
     }
 
-    // Create a plain linear buffer flagged as externally-memory-backed. Venus
-    // uses the renderer-side OPAQUE_FD handle type for the pNext chain.
+    // Reproduce the creator's buffer contract exactly. External dedicated
+    // memory imports require compatible buffer creation parameters on both
+    // sides; TRANSFER_DST is unused here but is present on the KMD buffer whose
+    // exported payload this object imports.
     VkExternalMemoryBufferCreateInfo externalInfo = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
     externalInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
     VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &externalInfo };
     bufferInfo.size        = allocSize;
-    bufferInfo.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufferInfo.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VkBuffer buffer = VK_NULL_HANDLE;
