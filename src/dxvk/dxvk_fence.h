@@ -31,7 +31,7 @@ namespace dxvk {
     // Helios named NT sharing (WS1 #4). At most one may be set, and only
     // with sharedType = OPAQUE_WIN32 (monitored fences have no KMT flavor):
     //  - ntExportName: publish the created semaphore's WDDM sync under this
-    //    kernel object name (e.g. L"Global\\HeliosPresentFence_1234");
+    //    kernel object name (e.g. a caller-supplied name);
     //    ntSecurityAttributes (a SECURITY_ATTRIBUTES*) supplies the DACL a
     //    cross-principal consumer needs to open it.
     //  - ntImportName: import an existing named sync into this semaphore

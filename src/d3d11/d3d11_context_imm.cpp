@@ -49,6 +49,7 @@ namespace dxvk {
     if (this_thread::isInModuleDetachment())
       return;
 
+    m_device->cancelProducerWaits();
     ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
     SynchronizeDevice();
@@ -1149,13 +1150,16 @@ namespace dxvk {
 
   void D3D11ImmediateContext::HeliosSignalPresentFence(
     const Rc<DxvkFence>&        Fence,
-          uint64_t              Value) {
+          uint64_t              Value,
+    const Rc<HeliosProducerOperation>& Operation) {
     D3D10DeviceLock lock = LockContext();
 
     EmitCs([
       cFence = Fence,
-      cValue = Value
+      cValue = Value,
+      cOperation = Operation
     ] (DxvkContext* ctx) {
+      ctx->trackProducer(cOperation);
       ctx->signalFence(cFence, cValue);
     });
   }
@@ -1164,13 +1168,16 @@ namespace dxvk {
   void D3D11ImmediateContext::HeliosCopyExternalFrame(
     const Rc<DxvkImage>&        DstImage,
     const Rc<DxvkImage>&        SrcImage,
-          VkExtent3D            Extent) {
+          VkExtent3D            Extent,
+      const Rc<DxvkFence>&        Semaphore,
+            uint64_t             Value) {
     D3D10DeviceLock lock = LockContext();
 
     EmitCs([
       cDstImage = DstImage,
       cSrcImage = SrcImage,
-      cExtent   = Extent
+      cExtent   = Extent,
+      cDependency = HeliosProducerDependency { nullptr, Value, Semaphore }
     ] (DxvkContext* ctx) {
       const VkImageSubresourceLayers layers =
         { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u };
@@ -1178,7 +1185,7 @@ namespace dxvk {
         ctx->copyImage(
           cDstImage, layers, VkOffset3D { 0, 0, 0 },
           cSrcImage, layers, VkOffset3D { 0, 0, 0 },
-          cExtent);
+          cExtent, &cDependency);
       } else {
         // A packed 10-bit direct primary cannot be published to the AR24
         // scan-out contract as raw words. The snapshot ring is RGBA8 for that
@@ -1186,7 +1193,7 @@ namespace dxvk {
         ctx->copyImageConverted(
           cDstImage, layers, VkOffset3D { 0, 0, 0 },
           cSrcImage, layers, VkOffset3D { 0, 0, 0 },
-          cExtent);
+          cExtent, &cDependency);
       }
     });
   }

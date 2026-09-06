@@ -166,7 +166,8 @@ namespace dxvk {
      */
     void HeliosSignalPresentFence(
       const Rc<DxvkFence>&        Fence,
-            uint64_t              Value);
+            uint64_t              Value,
+      const Rc<HeliosProducerOperation>& Operation);
 
     /**
      * \brief Helios: image-level copy for the dcomp present vehicle
@@ -184,7 +185,9 @@ namespace dxvk {
     void HeliosCopyExternalFrame(
       const Rc<DxvkImage>&        DstImage,
       const Rc<DxvkImage>&        SrcImage,
-            VkExtent3D            Extent);
+            VkExtent3D            Extent,
+      const Rc<DxvkFence>&        Semaphore,
+            uint64_t             Value);
 
     /**
      * \brief Helios: ordered snapshot copy for the D4b scanout ring

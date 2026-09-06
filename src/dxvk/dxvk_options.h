@@ -52,18 +52,6 @@ namespace dxvk {
     /// Latency tolerance, in microseconds
     int32_t latencyTolerance = 0u;
 
-    /// Helios WS1 #4 consumer-side present wait: before refreshing an
-    /// IMPORTED shared surface with a published present-fence slot, wait
-    /// (bounded, microseconds) for the producer's published value. 0
-    /// disables. On for EVERY consumer by default: WUDFHost ordering its
-    /// copy against dwm is not enough — dwm composing app backbuffers has
-    /// the same producer/consumer race (proven live 2026-07-06: with the
-    /// per-present gate registry-disabled, stale/torn app content reappeared
-    /// in dwm's OWN composition). The wait DAG is acyclic (IDD -> dwm ->
-    /// apps) and every edge is bounded; it only ever fires for cross-process
-    /// imports that actually publish (dwm/IDD paths, not game textures).
-    int32_t heliosPresentWaitUs = 32000;
-
     /// Helios staged-surface content probes (bring-up diagnostics): at
     /// fixed refresh ticks, read the full raw+post-copy surface back and
     /// characterize the bytes. ROOT-CAUSED as the recurring ~1.5 s pipeline
@@ -74,16 +62,6 @@ namespace dxvk {
     /// only — default OFF; enable per-process via DXVK_CONFIG for black-
     /// surface triage.
     bool heliosStagedProbes = false;
-
-    /// Helios staged refresh: skip re-staging an image whose newest
-    /// published value is (a) kwait-ordered — the producer's flip is
-    /// kernel-held until the value retires — and (b) not yet retired.
-    /// The consumer cannot be sampling that image yet (its flip has not
-    /// completed), so blocking the CS thread for it only stalls the
-    /// composition of OTHER content (dwm's 9 ms windowed-game hitches,
-    /// 28th session). The current staged bytes stay; the bind-time gate
-    /// is re-armed so the retry converges. Kill switch for A/B.
-    bool heliosSkipUnretiredRefresh = true;
 
     /// Disable VK_NV_low_latency2. This extension
     /// appears to be all sorts of broken on 32-bit.

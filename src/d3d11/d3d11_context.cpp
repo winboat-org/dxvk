@@ -1,6 +1,6 @@
 #include <algorithm>
 
-#include "../dxvk/dxvk_helios_present_sync.h"
+#include "../dxvk/dxvk_helios_producer.h"
 
 #include "d3d11_context.h"
 #include "d3d11_context_def.h"
@@ -3612,19 +3612,21 @@ namespace dxvk {
 
           anyStaged = true;
 
-          const uint32_t resid = image->info().sharing.heliosResourceId;
-
-          if (!resid)
+          if (image->info().sharing.heliosDedicatedPresentBuffer)
             continue;
-
-          uint32_t slotPid = 0u, slotFenceId = 0u;
-          uint64_t slotValue = 0u;
-
-          if (HeliosPresentSync::lookup(
-                resid, &slotPid, &slotFenceId, nullptr, &slotValue)
-           && slotValue > image->heliosLastRefreshValue()
-           && image->heliosClaimFlushForValue(slotValue))
+          auto producer = image->storage()->heliosProducer();
+          if (producer == nullptr)
+            throw DxvkError("Helios: staged SRV has no allocation producer binding");
+          helios_producer_snapshot snapshot = { };
+          const auto status = producer->sample(snapshot);
+          if (status < 0)
+            throw DxvkError("Helios: staged SRV producer is terminal");
+          if (status == VK_NOT_READY) {
             flushNeeded = true;
+          } else if (image->heliosNeedsRefresh(snapshot.generation, snapshot.announced)
+                  && image->heliosClaimFlush(snapshot.generation, snapshot.announced)) {
+            flushNeeded = true;
+          }
         }
       }
 
@@ -3634,7 +3636,7 @@ namespace dxvk {
       }
 
       if (flushNeeded) {
-        HeliosPresentSync::noteGateFlush();
+        HeliosProducerBinding::noteGateFlush();
         static_cast<D3D11ImmediateContext*>(this)->Flush();
       }
     }

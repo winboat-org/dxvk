@@ -165,6 +165,12 @@ namespace dxvk {
       return m_heliosScanoutAcquire;
     }
 
+    // Teardown must cancel unsubmitted foreign reads before draining workers.
+    // Waiting until the submission queue's destructor would deadlock the drain.
+    void cancelProducerWaits() {
+      m_submissionQueue.cancelProducerWaits();
+    }
+
     /**
      * \brief Queue handles
      * 

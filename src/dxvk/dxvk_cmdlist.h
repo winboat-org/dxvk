@@ -9,6 +9,7 @@
 #include "dxvk_descriptor_pool.h"
 #include "dxvk_descriptor_worker.h"
 #include "dxvk_fence.h"
+#include "dxvk_helios_producer.h"
 #include "dxvk_gpu_event.h"
 #include "dxvk_gpu_query.h"
 #include "dxvk_graphics.h"
@@ -405,6 +406,24 @@ namespace dxvk {
     void waitFence(Rc<DxvkFence> fence, uint64_t value) {
       if (fence->getValue() < value)
         m_waitSemaphores.emplace_back(std::move(fence), value);
+    }
+
+    void waitProducer(const HeliosProducerDependency& dependency) {
+      for (const auto& known : m_producerWaits)
+        if (known.binding == dependency.binding && known.epoch == dependency.epoch)
+          return;
+      m_producerWaits.push_back(dependency);
+    }
+
+    VkResult waitProducers(const std::atomic<bool>& stopped);
+
+    void trackProducer(const Rc<HeliosProducerOperation>& operation) {
+      m_producerSignals.push_back(operation);
+    }
+
+    void producerSubmitted(bool success) {
+      for (const auto& operation : m_producerSignals)
+        operation->submitted(success);
     }
     
     /**
@@ -1376,6 +1395,8 @@ namespace dxvk {
     DxvkCommandSubmission     m_commandSubmission;
 
     small_vector<DxvkFenceValuePair, 4> m_waitSemaphores;
+    small_vector<HeliosProducerDependency, 4> m_producerWaits;
+    small_vector<Rc<HeliosProducerOperation>, 4> m_producerSignals;
     small_vector<DxvkFenceValuePair, 4> m_signalSemaphores;
 
     small_vector<DxvkCommandSubmissionInfo, 4> m_cmdSubmissions;

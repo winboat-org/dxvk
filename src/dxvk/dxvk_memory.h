@@ -9,6 +9,7 @@
 #include "dxvk_allocator.h"
 #include "dxvk_descriptor.h"
 #include "dxvk_hash.h"
+#include "dxvk_helios_producer.h"
 
 #include "../util/util_time.h"
 
@@ -595,6 +596,18 @@ namespace dxvk {
       m_ownsKmtHandles = false;
     }
 
+    // Installed before resource publication. Backing rotation moves this
+    // reference with its allocation; the private staging destination retains
+    // the external source's binding, also installed on its alias image.
+    bool setHeliosProducer(const Rc<HeliosProducerBinding>& producer) {
+      if (m_heliosProducer != nullptr)
+        return m_heliosProducer->generation() == producer->generation();
+      m_heliosProducer = producer;
+      return true;
+    }
+
+    Rc<HeliosProducerBinding> heliosProducer() const { return m_heliosProducer; }
+
     /**
      * \brief Queries memory info
      * \returns Memory info
@@ -605,40 +618,6 @@ namespace dxvk {
       result.offset = m_address & DxvkPageAllocator::ChunkAddressMask;
       result.size = m_size;
       return result;
-    }
-
-    /**
-     * \brief Marks this exact backing allocation as a present-sync producer
-     *
-     * The `(fence generation, resource id)` tuple is
-     * immutable for this publication. The marker is written only after its HPS2
-     * slot publication succeeded, then taken by the allocation destructor
-     * before it frees that memory.
-     */
-    bool setHeliosPresentSlot(uint32_t resid, uint32_t fenceId) {
-      if (!resid || !fenceId)
-        return false;
-
-      const uint64_t slot = (uint64_t(fenceId) << 32) | resid;
-      uint64_t expected = 0u;
-      if (m_heliosPresentSlot.compare_exchange_strong(expected, slot,
-          std::memory_order_release, std::memory_order_acquire)) {
-        return true;
-      }
-      return expected == slot;
-    }
-
-    struct HeliosPresentSlot {
-      uint32_t resid;
-      uint32_t fenceId;
-    };
-
-    HeliosPresentSlot takeHeliosPresentSlot() {
-      const uint64_t slot = m_heliosPresentSlot.exchange(0u, std::memory_order_acq_rel);
-      return {
-        uint32_t(slot),
-        uint32_t(slot >> 32),
-      };
     }
 
     /**
@@ -726,7 +705,7 @@ namespace dxvk {
     D3DKMT_HANDLE               m_kmtLocal = 0;
     D3DKMT_HANDLE               m_kmtGlobal = 0;
     bool                        m_ownsKmtHandles = false;
-    std::atomic<uint64_t>       m_heliosPresentSlot = { 0u };
+    Rc<HeliosProducerBinding>   m_heliosProducer;
 
     DxvkSparsePageTable*        m_sparsePageTable = nullptr;
 

@@ -8,7 +8,7 @@
 
 #include "dxvk_device.h"
 #include "dxvk_context.h"
-#include "dxvk_helios_present_sync.h"
+#include "dxvk_helios_producer.h"
 
 namespace dxvk {
 
@@ -199,7 +199,7 @@ namespace dxvk {
     const VkDebugUtilsLabelEXT*       reason,
           DxvkSubmitStatus*           status) {
     // Helios cross-process present ordering: turn the imported surfaces this
-    // list sampled into GPU-side timeline waits on their producers' frames.
+    // list sampled into retained resource epochs waited by the submission worker.
     // Must precede endRecording so the waits ride THIS submission.
     heliosEmitImportedWaits();
 
@@ -581,15 +581,12 @@ namespace dxvk {
     const Rc<DxvkImage>&        srcImage,
           VkImageSubresourceLayers srcSubresource,
           VkOffset3D            srcOffset,
-          VkExtent3D            extent) {
-    // Helios consumer-side ordering AT COPY TIME. Reading the publication
-    // earlier in a persistent refresh cycle can target an old value that
-    // "succeeds" while the copy sees ring-stale content inside new damage
-    // (the drag-trail ghosting, root-caused 2026-07-06). Here the acquire has
-    // already happened and the source cannot be re-presented while the
-    // consumer holds it, so the slot value is the acquired present's exact
-    // wait target. No-op for non-imported sources and when disabled.
-    heliosPresentWaitBeforeRefresh(srcImage);
+          VkExtent3D            extent,
+    const HeliosProducerDependency* producer) {
+    // Capture the exact source epoch for this read, or consume the dependency
+    // already captured by a refresh / passed explicitly by WSI. The command
+    // list waits on its submission worker before any source-reading work.
+    heliosPresentWaitBeforeRefresh(srcImage, producer);
 
     if (this->copyImageClear(dstImage, dstSubresource, dstOffset, extent, srcImage, srcSubresource)
      || this->copyImageInline(*dstImage, dstSubresource, dstOffset, *srcImage, srcSubresource, srcOffset, extent))
@@ -628,11 +625,12 @@ namespace dxvk {
     const Rc<DxvkImage>&        srcImage,
           VkImageSubresourceLayers srcSubresource,
           VkOffset3D            srcOffset,
-          VkExtent3D            extent) {
+          VkExtent3D            extent,
+    const HeliosProducerDependency* producer) {
     // Keep the same import-ordering contract as copyImage. DXGI Blt normally
     // operates on local resources, but an opened composition surface is a
     // valid operand and must not be sampled before its producer publication.
-    heliosPresentWaitBeforeRefresh(srcImage);
+    heliosPresentWaitBeforeRefresh(srcImage, producer);
 
     // copyImageFb is deliberately a COPY emulator: for two color images it
     // creates source and destination views in the destination format. That is
@@ -9790,222 +9788,40 @@ namespace dxvk {
   }
 
 
-  void DxvkContext::heliosPresentWaitBeforeRefresh(const Rc<DxvkImage>& image) {
-    const int32_t waitUs = m_device->config().heliosPresentWaitUs;
-
-    // Only reads of surfaces THIS process imported are consumer reads; the
-    // creator's own refresh enrollments (dwm's GDI staging) must never pick
-    // up a blocking wait from here.
+  HeliosProducerDependency DxvkContext::heliosPresentWaitBeforeRefresh(
+    const Rc<DxvkImage>& image, const HeliosProducerDependency* captured) {
+    if (captured) {
+      if (captured->binding != nullptr) m_cmd->waitProducer(*captured);
+      if (captured->externalSemaphore != nullptr)
+        m_cmd->waitFence(captured->externalSemaphore, captured->epoch);
+      return *captured;
+    }
     if (image->info().sharing.mode != DxvkSharedHandleMode::Import)
-      return;
-
-    const uint32_t resid = image->info().sharing.heliosResourceId;
-
-    uint32_t pid = 0u;
-    uint32_t fenceId = 0u;
-    uint64_t producerStart = 0u;
-    uint64_t value = 0u;
-
-    if (!resid || !HeliosPresentSync::lookup(
-          resid, &pid, &fenceId, &producerStart, &value)) {
-      // No publish slot = an UNORDERED read of an imported surface. Counted
-      // loudly: this silent return is exactly what hid the drag-trail root
-      // cause (2026-07-06).
-      m_heliosPresentWaitNoSlot += 1u;
-      if ((m_heliosPresentWaitNoSlot % 512u) == 1u) {
-        Logger::info(str::format("present-wait: unordered imported reads (no slot): ",
-          m_heliosPresentWaitNoSlot, " (resid ", resid, ")"));
-      }
-      return;
-    }
-
-    DxvkFence* fence = heliosProducerFence(pid, producerStart, fenceId);
-    if (fence == nullptr)
-      return;
-
-    if (fence->getValue() >= value) {
-      m_heliosPresentWaitFast += 1u;
-      return;
-    }
-
-    // This optional producer-timeline wait is a freshness hint for legacy
-    // imported images. It is not the KMD Present-buffer ownership handshake.
-    if (waitUs <= 0)
-      return;
-
-    const auto t0 = dxvk::high_resolution_clock::now();
-    const VkResult vr = fence->waitBounded(value, uint64_t(waitUs) * 1000u);
-    const auto t1 = dxvk::high_resolution_clock::now();
-
-    m_heliosPresentWaits += 1u;
-    m_heliosPresentWaitUsTotal += uint64_t(
-      std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
-
-    if (vr != VK_SUCCESS) {
-      m_heliosPresentWaitTimeouts += 1u;
-      Logger::warn(str::format("Helios present-wait: resid ", resid,
-        " value ", value, " NOT reached (", vr, ", fence at ",
-        fence->getValue(), ") within ", waitUs,
-        "us — ordering not proven (x", m_heliosPresentWaitTimeouts, ")"));
-    }
-
-    if ((m_heliosPresentWaits % 128u) == 0u) {
-      Logger::info(str::format("present-wait: waits=", m_heliosPresentWaits,
-        " avg_us=", m_heliosPresentWaitUsTotal / m_heliosPresentWaits,
-        " timeouts=", m_heliosPresentWaitTimeouts,
-        " fast=", m_heliosPresentWaitFast,
-        " noslot=", m_heliosPresentWaitNoSlot,
-        " gate_flushes=", HeliosPresentSync::gateFlushCount(),
-        " refresh_skips=", m_heliosRefreshSkips));
-    }
-
+      return { };
+    if (image->info().sharing.heliosDedicatedPresentBuffer)
+      return { }; // The separate KMD reader ownership handshake orders this source.
+    auto binding = image->storage()->heliosProducer();
+    if (binding == nullptr)
+      throw DxvkError("Helios: imported source has no allocation producer binding");
+    helios_producer_snapshot snapshot = { };
+    if (binding->sample(snapshot) != VK_SUCCESS)
+      throw DxvkError("Helios: imported source status is unavailable");
+    HeliosProducerDependency dependency = { binding, snapshot.announced };
+    m_cmd->waitProducer(dependency);
+    return dependency;
   }
-
 
   void DxvkContext::heliosNoteSampledShared(DxvkImage* image) {
-    const auto& sharing = image->info().sharing;
-
-    if (sharing.mode == DxvkSharedHandleMode::Export) {
-      m_heliosSampledExport += 1u;
-      return;
-    }
-
-    m_heliosSampledImport += 1u;
-
-    const uint32_t resid = sharing.heliosResourceId;
-
-    if (!resid) {
-      // Imported through a HANDLE rather than by venus resource id, so there is
-      // no key to look a publish slot up by. Counted: it would otherwise look
-      // identical to "nothing shared was sampled".
-      m_heliosSampledNoResid += 1u;
-      return;
-    }
-
-    // Linear scan: the list is the set of imported surfaces sampled by ONE
-    // command list, i.e. the visible app windows dwm is compositing. A hash set
-    // would cost more than the scan at that size.
-    for (uint32_t known : m_heliosImportedReads) {
-      if (known == resid)
-        return;
-    }
-
-    m_heliosImportedReads.push_back(resid);
+    if (image->info().sharing.mode != DxvkSharedHandleMode::Import) return;
+    for (const auto& known : m_heliosImportedReads)
+      if (known.ptr() == image) return;
+    m_heliosImportedReads.emplace_back(image);
   }
-
 
   void DxvkContext::heliosEmitImportedWaits() {
-    // Cadence lives here, not behind the early-out: "no waits emitted" is a
-    // result that has to be reportable, and it is the one this instrument was
-    // added to explain.
-    m_heliosFlushes += 1u;
-
-    if ((m_heliosFlushes % 1024u) == 1u) {
-      Logger::info(str::format("present-order: flushes=", m_heliosFlushes,
-        " sampled_import=", m_heliosSampledImport,
-        " sampled_export=", m_heliosSampledExport,
-        " import_no_resid=", m_heliosSampledNoResid,
-        " gpu_waits=", m_heliosImportedWaitsEmitted,
-        " noslot=", m_heliosImportedNoSlot,
-        " producers=", m_heliosImportedWaited.size()));
-    }
-
-    if (m_heliosImportedReads.empty())
-      return;
-
-    for (uint32_t resid : m_heliosImportedReads) {
-      uint32_t pid = 0u;
-      uint32_t fenceId = 0u;
-      uint64_t producerStart = 0u;
-      uint64_t value = 0u;
-
-      if (!HeliosPresentSync::lookup(
-            resid, &pid, &fenceId, &producerStart, &value)) {
-        // No slot = this producer publishes nothing, so its surface is read
-        // UNORDERED. Loud rather than silent: a steady nonzero count here is
-        // the black-frame defect, named.
-        m_heliosImportedNoSlot += 1u;
-
-        if ((m_heliosImportedNoSlot % 512u) == 1u) {
-          Logger::info(str::format("present-order: sampled imported surface with no slot: ",
-            m_heliosImportedNoSlot, " (resid ", resid, ")"));
-        }
-
-        continue;
-      }
-
-      DxvkFence* fence = heliosProducerFence(pid, producerStart, fenceId);
-
-      if (fence == nullptr)
-        continue;
-
-      // Skip a value this submission chain has already waited past. Correct
-      // because timeline values only advance: an earlier submission waiting for
-      // >= value is ordered ahead of this one on the same queue.
-      const HeliosPresentFenceKey key = { pid, fenceId, producerStart };
-      uint64_t& waited = m_heliosImportedWaited[key];
-
-      if (waited >= value)
-        continue;
-
-      waited = value;
-
-      // The GPU-side wait. Unlike a CPU wait this costs the calling thread
-      // nothing: the queue blocks until the producer's frame completes, and the
-      // CPU carries on recording.
-      m_cmd->waitFence(Rc<DxvkFence>(fence), value);
-      m_heliosImportedWaitsEmitted += 1u;
-    }
-
+    for (const auto& image : m_heliosImportedReads)
+      heliosPresentWaitBeforeRefresh(image);
     m_heliosImportedReads.clear();
-  }
-
-
-  DxvkFence* DxvkContext::heliosProducerFence(
-          uint32_t pid,
-          uint64_t producerStart,
-          uint32_t fenceId) {
-    // The process creation time is part of both the cache key and kernel name.
-    // HPS2 persists across boots, so pid and this per-DLL fence counter alone
-    // are an ABA-prone identity (observed as DWM waiting 129 -> stale 1416).
-    const HeliosPresentFenceKey fenceKey = { pid, fenceId, producerStart };
-    auto& entry = m_heliosPresentWaitFences[fenceKey];
-
-    if (entry.fence == nullptr) {
-      if (entry.retryCountdown > 0u) {
-        entry.retryCountdown -= 1u;
-        return nullptr;
-      }
-
-      // Import the producer's named present fence. A dead producer (stale
-      // slot) makes the name unresolvable: negative-cache with periodic
-      // retry so a respawned producer with a recycled pid still connects.
-      const std::wstring name = L"Global\\HeliosPresentFence_" + std::to_wstring(pid)
-                              + L"_" + std::to_wstring(producerStart)
-                              + L"_" + std::to_wstring(fenceId);
-
-      try {
-        DxvkFenceCreateInfo fenceInfo = { };
-        fenceInfo.initialValue = 0u;
-        fenceInfo.sharedType   = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-        fenceInfo.ntImportName = name.c_str();
-        entry.fence = m_device->createFence(fenceInfo);
-        Logger::info(str::format("Helios present-wait: imported fence ", fenceId,
-          " of producer pid ", pid, " start ", producerStart));
-      } catch (const DxvkError& e) {
-        entry.retryCountdown = 256u;
-        static uint32_t s_importFails = 0u;
-        const uint32_t n = ++s_importFails;
-        if (n == 1u || (n % 64u) == 0u) {
-          Logger::warn(str::format("Helios present-wait: import of producer pid ",
-            pid, " start ", producerStart, " fence FAILED (x", n,
-            "): ", e.message()));
-        }
-        return nullptr;
-      }
-    }
-
-    return entry.fence.ptr();
   }
 
 
@@ -10235,7 +10051,7 @@ namespace dxvk {
 
       // Owning D3D11 resource destroyed: drop the enrollment immediately.
       // Without this the dead producer's imports keep getting full-image
-      // refresh copies + failed slot lookups per list until the idle prune
+      // refresh copies + failed producer checks per list until the idle prune
       // (observed live: three 500x500 zombie copies per list for ~60 s per
       // dead vkcube chain), and the Rc here pins their venus resources.
       if (image->isHeliosOrphaned()) {
@@ -10256,44 +10072,9 @@ namespace dxvk {
         continue;
       }
 
-      // Skip-if-unretired (28th session): when the image's newest published
-      // value is KWAIT-ORDERED (the producer's flip is dxgkrnl-held until
-      // the value retires) and has not retired yet, this consumer cannot be
-      // sampling the image this list — its flip has not completed. The
-      // copy-execution wait below would block the CS thread ~a full copy
-      // latency (dwm measured 8.9 ms per hit = the windowed-game
-      // composition stutter) for content nothing samples yet. Keep the
-      // current staged bytes, re-arm the bind-time gate so the retry
-      // converges even if no newer publish arrives, and count. NEVER
-      // applied to non-kwait publishes (dwm->IddCx): there the bounded
-      // wait IS the orderer, and skipping could freeze the captured
-      // display one frame behind on an idle desktop.
-      if (m_device->config().heliosSkipUnretiredRefresh) {
-        const uint32_t resid = image->info().sharing.heliosResourceId;
-        uint32_t slotPid = 0u, slotFenceId = 0u;
-        uint64_t slotProducerStart = 0u, slotValue = 0u;
-        bool kwaitOrdered = false;
-
-        if (resid
-         && HeliosPresentSync::lookup(resid, &slotPid, &slotFenceId,
-              &slotProducerStart, &slotValue, &kwaitOrdered)
-         && kwaitOrdered
-         && slotValue > image->heliosLastRefreshValue()) {
-          DxvkFence* fence = heliosProducerFence(
-            slotPid, slotProducerStart, slotFenceId);
-
-          if (fence != nullptr && fence->getValue() < slotValue) {
-            image->heliosReleaseFlushClaim(slotValue);
-            m_heliosRefreshSkips += 1u;
-            if ((m_heliosRefreshSkips % 512u) == 1u) {
-              Logger::info(str::format("refresh-skip: unretired kwait value, "
-                "staged bytes kept (x", m_heliosRefreshSkips, ", resid ", resid, ")"));
-            }
-            ++entry;
-            continue;
-          }
-        }
-      }
+      // Capture exactly once. The alias copy receives this same dependency,
+      // and the private image is stamped with this epoch after recording it.
+      const auto dependency = heliosPresentWaitBeforeRefresh(image);
 
       VkImageSubresourceLayers subresource = { };
       subresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -10302,17 +10083,11 @@ namespace dxvk {
       subresource.layerCount     = 1u;
 
       if (stagingImage != nullptr) {
-        // Device-local staging v2: image-to-image copy from the direct-bind
-        // alias — the only read that correctly decodes the blob's OPTIMAL
-        // (tiled) layout. WS1 #4 consumer-side ordering comes from
-        // copyImage's own copy-execution-time wait on the alias (6eab004c —
-        // it re-reads the publish slot HERE, the freshest value); the old
-        // list-start wait this loop used to run first was a second bounded
-        // wait per surface per list targeting a staler value, adding
-        // latency and nothing else (removed 24th session).
+        // Preserve the tiled alias copy and its external-memory barriers.
+        // It consumes the epoch captured above and never samples a newer one.
         copyImage(image, subresource, VkOffset3D { 0, 0, 0 },
           stagingImage, subresource, VkOffset3D { 0, 0, 0 },
-          image->mipLevelExtent(0u));
+          image->mipLevelExtent(0u), &dependency);
       } else {
         const bool dedicatedPresentBuffer =
           image->info().sharing.heliosDedicatedPresentBuffer;
@@ -10324,15 +10099,15 @@ namespace dxvk {
           if (!claimHeliosPresentBufferRead(
                 image->info().sharing.heliosResourceId,
                 presentBufferFence, presentBufferValue)) {
-            m_heliosRefreshSkips += 1u;
+            m_heliosPresentBufferRefreshSkips += 1u;
             ++entry;
             continue;
           }
         } else {
           // The old image-compatible buffer ABI has no bidirectional ownership
           // protocol. Preserve its producer freshness wait without pretending
-          // that the HPS timeline is a Vulkan queue-family transfer proof.
-          heliosPresentWaitBeforeRefresh(image);
+          // that producer completion is a Vulkan queue-family transfer proof.
+          heliosPresentWaitBeforeRefresh(image, &dependency);
         }
 
         // The KMD/DXVK external buffer contract intentionally contains only
@@ -10353,19 +10128,8 @@ namespace dxvk {
         }
       }
 
-      // Stamp the producer value this refresh observed: the bind-time
-      // staleness gate compares the live slot against this to decide
-      // whether a flush (hence a re-stage at that submitted list's tail) is needed
-      // before sampling. Consumer freshness must track producer progress,
-      // not command-list cadence — an idle process's chunks can span many
-      // frames (root cause of the frozen-frame alternation, 27th session).
-      if (const uint32_t resid = image->info().sharing.heliosResourceId) {
-        uint32_t slotPid = 0u, slotFenceId = 0u;
-        uint64_t slotValue = 0u;
-        if (HeliosPresentSync::lookup(
-              resid, &slotPid, &slotFenceId, nullptr, &slotValue))
-          image->setHeliosLastRefreshValue(slotValue);
-      }
+      if (dependency.binding != nullptr)
+        image->setHeliosLastRefresh(dependency.binding->generation(), dependency.epoch);
 
       // Content probes: at each probe tick, read back BOTH the raw source
       // (alias image detiled / host-visible buffer raw) and the PRIVATE image

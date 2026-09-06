@@ -80,6 +80,7 @@ namespace dxvk {
     // would park the queue and turn waitForIdle into the vn 8 s
     // forward-progress device-lost path (spec §5.3 teardown order).
     m_heliosScanoutAcquire.shutdown();
+    cancelProducerWaits();
 
     // Wait for all pending Vulkan commands to be
     // executed before we destroy any resources.

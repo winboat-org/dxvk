@@ -19,9 +19,7 @@ namespace dxvk {
     tearFree              = config.getOption<Tristate>("dxvk.tearFree",               Tristate::Auto);
     latencySleep          = config.getOption<Tristate>("dxvk.latencySleep",           Tristate::Auto);
     latencyTolerance      = config.getOption<int32_t> ("dxvk.latencyTolerance",       1000);
-    heliosPresentWaitUs   = config.getOption<int32_t> ("dxvk.heliosPresentWaitUs",    32000);
     heliosStagedProbes    = config.getOption<bool>    ("dxvk.heliosStagedProbes",     false);
-    heliosSkipUnretiredRefresh = config.getOption<bool>("dxvk.heliosSkipUnretiredRefresh", true);
     disableNvLowLatency2  = config.getOption<Tristate>("dxvk.disableNvLowLatency2",   Tristate::Auto);
     hideIntegratedGraphics = config.getOption<bool>   ("dxvk.hideIntegratedGraphics", false);
     zeroMappedMemory      = config.getOption<bool>    ("dxvk.zeroMappedMemory",       false);

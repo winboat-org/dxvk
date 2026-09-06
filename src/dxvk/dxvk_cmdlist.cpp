@@ -481,7 +481,23 @@ namespace dxvk {
   }
 
   
+  VkResult DxvkCommandList::waitProducers(const std::atomic<bool>& stopped) {
+    for (const auto& dependency : m_producerWaits) {
+      while (!stopped.load(std::memory_order_acquire)) {
+        if (m_device->getDeviceStatus() == VK_ERROR_DEVICE_LOST)
+          return VK_ERROR_DEVICE_LOST;
+        const VkResult result = dependency.binding->wait(dependency.epoch, 50000000);
+        if (result == VK_SUCCESS) break;
+        if (result != VK_TIMEOUT) return VK_ERROR_DEVICE_LOST;
+      }
+      if (stopped.load(std::memory_order_acquire)) return VK_ERROR_DEVICE_LOST;
+    }
+    return VK_SUCCESS;
+  }
+
   void DxvkCommandList::reset() {
+    m_producerWaits.clear();
+    m_producerSignals.clear();
     resetCheckpoints();
 
     // We will re-apply heap bindings first thing in a

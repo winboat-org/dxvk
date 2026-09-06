@@ -5,7 +5,6 @@
 #include "../util/util_bit.h"
 
 #include "dxvk_device.h"
-#include "dxvk_helios_present_sync.h"
 #include "dxvk_memory.h"
 #include "dxvk_sparse.h"
 
@@ -276,15 +275,8 @@ namespace dxvk {
 
 
   DxvkResourceAllocation::~DxvkResourceAllocation() {
-    // The producer marks this exact allocation only after successful slot
-    // publication. Taking that immutable identity here follows backing
-    // rotation without resolving the Venus memory export for every unrelated
-    // allocation destruction. Release before KMT/Vulkan teardown so a later
-    // same-process id reuse cannot be erased by this old allocation.
-    const HeliosPresentSlot heliosPresentSlot = takeHeliosPresentSlot();
-
-    if (heliosPresentSlot.resid && heliosPresentSlot.fenceId)
-      HeliosPresentSync::release(heliosPresentSlot.resid, heliosPresentSlot.fenceId);
+    // Drop the device-bound status reference before KMT/Vulkan teardown.
+    m_heliosProducer = nullptr;
 
     if (unlikely(m_kmtLocal && m_ownsKmtHandles)) {
       D3DKMT_DESTROYALLOCATION destroy = { };

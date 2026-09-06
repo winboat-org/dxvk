@@ -88,6 +88,10 @@ namespace dxvk {
 
     ~DxvkSubmissionQueue();
 
+    void cancelProducerWaits() {
+      m_cancelProducerWaits.store(true, std::memory_order_release);
+    }
+
     /**
      * \brief Retrieves estimated GPU idle time
      *
@@ -224,6 +228,7 @@ namespace dxvk {
     std::atomic<VkResult>       m_lastError = { VK_SUCCESS };
     
     std::atomic<bool>           m_stopped = { false };
+    std::atomic<bool>           m_cancelProducerWaits = { false };
     std::atomic<uint64_t>       m_gpuIdle = { 0ull };
 
     dxvk::mutex                 m_mutex;

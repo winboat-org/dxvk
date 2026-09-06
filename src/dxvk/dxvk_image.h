@@ -941,20 +941,35 @@ namespace dxvk {
       return m_heliosDebugMagenta;
     }
 
-    /**
-     * \brief Producer present-sync value observed by the last staged refresh
-     *
-     * Stamped by refreshHeliosStagedImages when it re-stages this image; read
-     * at SRV-bind time to decide whether the producer has published a newer
-     * frame than the staged copy holds (bind-time staleness gate — consumer
-     * freshness must track producer progress, not command-list cadence).
-     */
-    uint64_t heliosLastRefreshValue() const {
-      return m_heliosLastRefreshValue.load(std::memory_order_acquire);
+    // Exact allocation generation and epoch consumed by the recorded copy.
+    void setHeliosLastRefresh(uint64_t generation, uint64_t epoch) {
+      m_heliosRefreshSequence.fetch_add(1, std::memory_order_acq_rel);
+      m_heliosRefreshGeneration.store(generation, std::memory_order_relaxed);
+      m_heliosLastRefreshValue.store(epoch, std::memory_order_relaxed);
+      m_heliosRefreshSequence.fetch_add(1, std::memory_order_release);
     }
 
-    void setHeliosLastRefreshValue(uint64_t value) {
-      m_heliosLastRefreshValue.store(value, std::memory_order_release);
+    bool heliosNeedsRefresh(uint64_t generation, uint64_t epoch) const {
+      for (uint32_t i = 0; i < 8; i++) {
+        const auto sequence = m_heliosRefreshSequence.load(std::memory_order_acquire);
+        if (sequence & 1) continue;
+        const auto gen = m_heliosRefreshGeneration.load(std::memory_order_relaxed);
+        const auto value = m_heliosLastRefreshValue.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (sequence == m_heliosRefreshSequence.load(std::memory_order_acquire))
+          return generation != gen || epoch > value;
+      }
+      return true; // Bounded contention requests a refresh, never reports fresh.
+    }
+
+    bool heliosClaimFlush(uint64_t generation, uint64_t epoch) {
+      // Only the serialized immediate-context recording thread changes claims.
+      if (m_heliosFlushGeneration != generation) {
+        m_heliosFlushGeneration = generation;
+        m_heliosFlushRequestedValue.store(epoch, std::memory_order_release);
+        return true;
+      }
+      return heliosClaimFlushForValue(epoch);
     }
 
     /**
@@ -974,21 +989,6 @@ namespace dxvk {
           return true;
       }
       return false;
-    }
-
-    /**
-     * \brief Re-arms the staleness gate after a skipped re-stage
-     *
-     * A refresh that SKIPS an unretired kwait-ordered value leaves the
-     * staged copy behind that value; releasing the claim lets a later
-     * bind flush again for the same value, so the retry converges even
-     * when no newer publish ever arrives. No-op if a newer value has
-     * been claimed meanwhile.
-     */
-    void heliosReleaseFlushClaim(uint64_t value) {
-      uint64_t expected = value;
-      m_heliosFlushRequestedValue.compare_exchange_strong(expected, value - 1u,
-        std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 
     /**
@@ -1044,6 +1044,9 @@ namespace dxvk {
     // the highest value a gate flush was already issued for (rate limit),
     // and the owning-resource-destroyed flag (zombie-refresh unenroll).
     std::atomic<uint64_t>       m_heliosLastRefreshValue = { 0u };
+    std::atomic<uint64_t>       m_heliosRefreshSequence = { 0u };
+    std::atomic<uint64_t>       m_heliosRefreshGeneration = { 0u };
+    uint64_t                   m_heliosFlushGeneration = 0u;
     std::atomic<uint64_t>       m_heliosFlushRequestedValue = { 0u };
     std::atomic<bool>           m_heliosOrphaned = { false };
 

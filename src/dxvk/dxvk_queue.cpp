@@ -29,6 +29,7 @@ namespace dxvk {
   
   DxvkSubmissionQueue::~DxvkSubmissionQueue() {
     auto vk = m_device->vkd();
+    cancelProducerWaits();
 
     { std::unique_lock<dxvk::mutex> lock(m_mutex);
       m_stopped.store(true);
@@ -152,6 +153,11 @@ namespace dxvk {
         entry = std::move(m_submitQueue.front());
       }
 
+      // Resource dependencies are consumed by the submission worker before
+      // sparse, transfer or graphics work, with BOTH queue mutexes dropped.
+      if (entry.submit.cmdList != nullptr && m_lastError != VK_ERROR_DEVICE_LOST)
+        entry.result = entry.submit.cmdList->waitProducers(m_cancelProducerWaits);
+
       // Submit command buffer to device
       if (m_lastError != VK_ERROR_DEVICE_LOST) {
         std::lock_guard<dxvk::mutex> lock(m_mutexQueue);
@@ -167,8 +173,9 @@ namespace dxvk {
               trackedSubmitId = entry.latency.frameId;
           }
 
-          entry.result = entry.submit.cmdList->submit(
-            m_semaphores, m_timelines, trackedSubmitId);
+          if (entry.result == VK_SUCCESS)
+            entry.result = entry.submit.cmdList->submit(
+              m_semaphores, m_timelines, trackedSubmitId);
           entry.timelines = m_timelines;
         } else if (entry.present.presenter != nullptr) {
           if (entry.latency.tracker)
@@ -193,6 +200,9 @@ namespace dxvk {
         // so that drivers get a chance to recover
         entry.result = VK_ERROR_DEVICE_LOST;
       }
+
+      if (entry.submit.cmdList != nullptr)
+        entry.submit.cmdList->producerSubmitted(entry.result == VK_SUCCESS);
 
       if (entry.status)
         entry.status->result = entry.result;
