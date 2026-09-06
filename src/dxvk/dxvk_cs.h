@@ -559,6 +559,12 @@ namespace dxvk {
 
   public:
 
+    // A recording exception can stop this worker before queue submission,
+    // so the submission queue's status alone cannot diagnose a pending copy.
+    bool hasError() const {
+      return m_hasError.load(std::memory_order_acquire);
+    }
+
     constexpr static uint64_t SynchronizeAll = ~0ull;
 
     DxvkCsThread(
@@ -626,6 +632,7 @@ namespace dxvk {
     std::atomic<uint64_t>       m_seqOrdered  = { 0u };
 
     std::atomic<bool>           m_stopped     = { false };
+    std::atomic<bool>           m_hasError    = { false };
     std::atomic<bool>           m_hasHighPrio = { false };
 
     alignas(CACHE_LINE_SIZE)

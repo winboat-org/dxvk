@@ -1097,6 +1097,32 @@ namespace dxvk {
   }
 
 
+  uint64_t D3D11ImmediateContext::HeliosFlushFrame() {
+    D3D10DeviceLock lock = LockContext();
+    if (m_csThread.hasError())
+      return 0;
+    ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, false);
+    return m_submissionId;
+  }
+
+
+  VkResult D3D11ImmediateContext::HeliosWaitSubmissionComplete(
+          uint64_t SubmissionId, uint64_t TimeoutUs) {
+    if (!SubmissionId || m_csThread.hasError()
+     || m_device->getDeviceStatus() != VK_SUCCESS)
+      return VK_ERROR_DEVICE_LOST;
+
+    const bool completed = m_submissionFence->waitFor(
+      SubmissionId, std::chrono::microseconds(TimeoutUs));
+
+    // Failure cleanup can notify CPU objects. A notification on a failed
+    // device is not proof that the host finished reading the source image.
+    if (m_csThread.hasError() || m_device->getDeviceStatus() != VK_SUCCESS)
+      return VK_ERROR_DEVICE_LOST;
+    return completed ? VK_SUCCESS : VK_TIMEOUT;
+  }
+
+
   void D3D11ImmediateContext::HeliosWaitFrameSubmitted() {
     uint64_t sequenceNumber;
 

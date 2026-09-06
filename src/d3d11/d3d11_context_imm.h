@@ -137,6 +137,11 @@ namespace dxvk {
      */
     bool HeliosWaitFrameComplete(uint64_t TimeoutUs);
 
+    // Capture the existing flush boundary once. A vehicle copy retains this
+    // value across pending waits; waiting must never flush or move its target.
+    uint64_t HeliosFlushFrame();
+    VkResult HeliosWaitSubmissionComplete(uint64_t SubmissionId, uint64_t TimeoutUs);
+
     /**
      * \brief Helios: waits until the current frame has been SUBMITTED
      *

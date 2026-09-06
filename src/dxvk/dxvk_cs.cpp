@@ -338,6 +338,7 @@ namespace dxvk {
         highPrio.clear();
       }
     } catch (const DxvkError& e) {
+      m_hasError.store(true, std::memory_order_release);
       Logger::err("Exception on CS thread!");
       Logger::err(e.message());
     }
