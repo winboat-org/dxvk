@@ -31,6 +31,9 @@ namespace dxvk {
   void D3D11Initializer::InitBuffer(
           D3D11Buffer*                pBuffer,
     const D3D11_SUBRESOURCE_DATA*     pInitialData) {
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      throw DxvkError("D3D11: resource initialization on failed device");
+
     if (!(pBuffer->Desc()->MiscFlags & D3D11_RESOURCE_MISC_TILED)) {
       VkMemoryPropertyFlags memFlags = pBuffer->GetBuffer()->memFlags();
 
@@ -44,6 +47,9 @@ namespace dxvk {
   void D3D11Initializer::InitTexture(
           D3D11CommonTexture*         pTexture,
     const D3D11_SUBRESOURCE_DATA*     pInitialData) {
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      throw DxvkError("D3D11: resource initialization on failed device");
+
     if (pTexture->Desc()->MiscFlags & D3D11_RESOURCE_MISC_TILED)
       InitTiledTexture(pTexture);
     else if (pTexture->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_DIRECT)
@@ -436,7 +442,8 @@ namespace dxvk {
     if (stagingMemoryInFlight > MaxMemoryInFlight) {
       ExecuteFlushLocked();
 
-      m_stagingSignal->wait(stats.allocatedTotal - MaxMemoryInFlight);
+      if (!m_device->waitForFence(*m_stagingSignal, stats.allocatedTotal - MaxMemoryInFlight))
+        throw DxvkError("D3D11: command stream failed while waiting for initialization");
     } else if (m_transferCommands >= MaxCommandsPerSubmission || stats.allocatedSinceLastReset >= MaxMemoryPerSubmission) {
       // Flush pending commands if there are a lot of updates in flight
       // to keep both execution time and staging memory in check.
@@ -488,7 +495,8 @@ namespace dxvk {
       // race deterministically for a regression test, sleep here between the
       // flush and the wait; a 150 ms sleep made it fire on the first
       // iteration, where 35 unassisted attempts had produced none.
-      m_device->waitForResource(*pResource->GetImage(), DxvkAccess::Write);
+      if (!m_device->waitForResource(*pResource->GetImage(), DxvkAccess::Write))
+        throw DxvkError("D3D11: command stream failed while initializing shared texture");
     }
 
     // If a keyed mutex is used, initialize that to the correct state as well.

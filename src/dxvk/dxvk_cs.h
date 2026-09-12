@@ -567,6 +567,8 @@ namespace dxvk {
 
     constexpr static uint64_t SynchronizeAll = ~0ull;
 
+    // Null device/context are supported for CPU-only commands, including the
+    // failure/lifetime regression test. Such commands must not access ctx.
     DxvkCsThread(
       const Rc<DxvkDevice>&   device,
       const Rc<DxvkContext>&  context);
@@ -578,7 +580,7 @@ namespace dxvk {
      * Can be used to efficiently play back large
      * command lists recorded on another thread.
      * \param [in] chunk The chunk to dispatch
-     * \returns Sequence number of the submission
+     * \returns Sequence number, or zero if the worker has failed/stopped
      */
     uint64_t dispatchChunk(DxvkCsChunkRef&& chunk);
 
@@ -592,9 +594,10 @@ namespace dxvk {
      * do not contribute to the main timeline.
      * \param [in] queue Which queue to add the chunk to
      * \param [in] chunk The chunk to dispatch
+     * \returns False if the worker failed or rejected the chunk
      * \param [in] synchronize Whether to wait for execution to complete
      */
-    void injectChunk(
+    bool injectChunk(
             DxvkCsQueue       queue,
             DxvkCsChunkRef&&  chunk,
             bool              synchronize);
@@ -604,11 +607,12 @@ namespace dxvk {
      * 
      * This waits for all chunks in the dispatch queue to
      * be processed by the thread, up to the given sequence
-     * number. If the sequence number is 0, this will wait
+     * number. If the sequence number is SynchronizeAll, this will wait
      * for all pending chunks to complete execution.
+     * \returns False on worker failure; completion counters are unchanged
      * \param [in] seq Sequence number to wait for.
      */
-    void synchronize(uint64_t seq);
+    bool synchronize(uint64_t seq);
     
     /**
      * \brief Retrieves last executed sequence number
@@ -655,6 +659,7 @@ namespace dxvk {
         ? m_seqOrdered : m_seqHighPrio;
     }
 
+    void fail();
     void threadFunc();
     
   };

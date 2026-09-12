@@ -683,23 +683,32 @@ namespace dxvk {
   }
 
 
-  void DxvkDevice::waitForFence(sync::Fence& fence, uint64_t value) {
+  bool DxvkDevice::waitForFence(sync::Fence& fence, uint64_t value) {
+    if (getDeviceStatus() != VK_SUCCESS)
+      return false;
     if (fence.value() >= value)
-      return;
+      return true;
 
     auto t0 = dxvk::high_resolution_clock::now();
 
-    fence.wait(value);
+    // These fences are signalled by submission completion. The same queue
+    // condition also wakes on recording failure, without advancing the fence.
+    m_submissionQueue.synchronizeUntil([this, &fence, value] {
+      return fence.value() >= value || getDeviceStatus() != VK_SUCCESS;
+    });
 
     auto t1 = dxvk::high_resolution_clock::now();
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
 
     m_statCounters.addCtr(DxvkStatCounter::GpuSyncCount, 1);
     m_statCounters.addCtr(DxvkStatCounter::GpuSyncTicks, us.count());
+    return getDeviceStatus() == VK_SUCCESS;
   }
 
 
-  void DxvkDevice::waitForResource(const DxvkPagedResource& resource, DxvkAccess access) {
+  bool DxvkDevice::waitForResource(const DxvkPagedResource& resource, DxvkAccess access) {
+    if (getDeviceStatus() != VK_SUCCESS)
+      return false;
     if (resource.isInUse(access)) {
       auto t0 = dxvk::high_resolution_clock::now();
       bool reportedStuck = false;
@@ -711,7 +720,7 @@ namespace dxvk {
       // contents are undefined on a lost device anyway.
       m_submissionQueue.synchronizeUntil([this, &resource, access, &reportedStuck] {
         if (!resource.isInUse(access)
-         || m_submissionQueue.getLastError() == VK_ERROR_DEVICE_LOST)
+         || getDeviceStatus() != VK_SUCCESS)
           return true;
 
         // HELIOS: name the stalled wait instead of hanging silently. Both
@@ -764,6 +773,7 @@ namespace dxvk {
       m_statCounters.addCtr(DxvkStatCounter::GpuSyncCount, 1);
       m_statCounters.addCtr(DxvkStatCounter::GpuSyncTicks, us.count());
     }
+    return getDeviceStatus() == VK_SUCCESS;
   }
   
   

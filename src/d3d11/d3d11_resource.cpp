@@ -135,7 +135,8 @@ namespace dxvk {
         Logger::warn("D3D11DXGIKeyedMutex::ReleaseSync: Called without context locking enabled.");
 
       D3D10DeviceLock lock = context->LockContext();
-      context->WaitForResource(*texture->GetImage(), DxvkCsThread::SynchronizeAll, D3D11_MAP_READ_WRITE, 0);
+      if (!context->WaitForResource(*texture->GetImage(), DxvkCsThread::SynchronizeAll, D3D11_MAP_READ_WRITE, 0))
+        return DXGI_ERROR_DEVICE_REMOVED;
     }
 
     auto keyedMutex = texture->GetImage()->getKeyedMutex();

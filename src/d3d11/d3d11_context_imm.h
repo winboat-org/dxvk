@@ -86,7 +86,7 @@ namespace dxvk {
             ID3D11Resource*             pResource,
             VkImageLayout               DstLayout);
 
-    void SynchronizeCsThread(
+    bool SynchronizeCsThread(
             uint64_t                          SequenceNumber);
 
     D3D10Multithread& GetMultithread() {
@@ -97,7 +97,7 @@ namespace dxvk {
       return m_multithread.AcquireLock();
     }
 
-    void InjectCsChunk(
+    bool InjectCsChunk(
             DxvkCsQueue                 Queue,
             DxvkCsChunkRef&&            Chunk,
             bool                        Synchronize);
@@ -122,20 +122,12 @@ namespace dxvk {
     /**
      * \brief Helios: bounded wait for the current frame's GPU completion
      *
-     * Flushes pending work and waits — bounded by \c TimeoutUs — until the
-     * flush's submission completes on the GPU (m_submissionFence reaches the
-     * flush's submission id; the fence signals at GPU completion, the same
-     * mechanism as the frame-latency event). Present-path ordering: nothing
-     * in this stack makes dwm's venus rendering visible to dxgkrnl as DMA,
-     * so no fence orders the IddCx consumer's copy against in-flight GPU
-     * writes of the just-presented buffer — the gate closes that window
-     * deterministically when it completes in time. On timeout (CS backlog /
-     * slow GPU) it returns false and the caller proceeds: a rare one-frame
-     * ghost self-heals at the next per-acquire refresh, and presents stay
-     * bounded instead of reintroducing multi-second churn dips.
-     * \returns \c true if the frame completed within the timeout
+     * Flushes pending work and waits for that submission fence, bounded by
+     * TimeoutUs. Recording/submission failure is distinct from a timeout:
+     * neither a failed flush nor an older fence may prove frame completion.
+     * \returns VK_SUCCESS, VK_TIMEOUT, or VK_ERROR_DEVICE_LOST
      */
-    bool HeliosWaitFrameComplete(uint64_t TimeoutUs);
+    VkResult HeliosWaitFrameComplete(uint64_t TimeoutUs);
 
     // Capture the existing flush boundary once. A vehicle copy retains this
     // value across pending waits; waiting must never flush or move its target.
@@ -155,9 +147,11 @@ namespace dxvk {
      * This is strictly weaker -- and far cheaper -- than
      * \ref HeliosWaitFrameComplete, which waits for GPU completion and thereby
      * removes all CPU/GPU overlap. It takes no timeout because it waits only on
-     * guest CPU threads; there is no slow-GPU case to bound.
+     * guest CPU threads. A terminal recording failure returns false without
+     * claiming that the frame reached the submission queue.
+     * \returns True if submitted, false if the device/worker failed
      */
-    void HeliosWaitFrameSubmitted();
+    bool HeliosWaitFrameSubmitted();
 
     /**
      * \brief Helios: record a present-fence signal on the open command list

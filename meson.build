@@ -231,3 +231,7 @@ if platform != 'windows'
 endif
 
 subdir('src')
+
+if get_option('enable_cs_tests')
+  subdir('tests')
+endif

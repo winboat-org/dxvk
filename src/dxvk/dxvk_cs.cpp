@@ -1,11 +1,25 @@
 #include "dxvk_cs.h"
 #include "dxvk_helios_feed_trace.h"
 
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 
 namespace dxvk {
 
   namespace {
+
+    template<typename Fn>
+    void reportCsError(Fn&& report) noexcept {
+      try {
+        report();
+      } catch (...) {
+        // In particular, a bad_alloc on the worker may also prevent Logger's
+        // string construction. Failure was already published; attempt a stderr
+        // diagnostic without further C++ allocation or an escaped exception.
+        std::fputs("DXVK: CS worker failed; command stream quarantined (logging failed)\n", stderr);
+      }
+    }
 
     // Default to producer sharding in Helios. Setting this to zero selects
     // only shard zero and reproduces the former single-pool mutex behavior.
@@ -39,17 +53,17 @@ namespace dxvk {
     auto cmd = m_head;
     
     if (m_flags.test(DxvkCsChunkFlag::SingleUse)) {
-      m_commandOffset = 0;
-      
       while (cmd != nullptr) {
-        auto next = cmd->next();
+        // Keep the throwing command and every unexecuted command in the
+        // live chain. reset() must never destroy an earlier command twice.
         cmd->exec(ctx);
+        m_head = cmd->next();
         cmd->~DxvkCsCmd();
-        cmd = next;
+        cmd = m_head;
       }
 
-      m_head = nullptr;
       m_next = &m_head;
+      m_commandOffset = 0;
     } else {
       while (cmd != nullptr) {
         cmd->exec(ctx);
@@ -130,8 +144,14 @@ namespace dxvk {
     chunk->reset();
 
     auto& shard = m_shards[shardIndex];
-    std::lock_guard<dxvk::mutex> lock(shard.mutex);
-    shard.chunks.push_back(chunk);
+    try {
+      std::lock_guard<dxvk::mutex> lock(shard.mutex);
+      shard.chunks.push_back(chunk);
+    } catch (const std::bad_alloc&) {
+      // Recycling is optional. A capture release/destructor must not throw
+      // merely because the cache cannot grow during failure cleanup.
+      delete chunk;
+    }
   }
   
   
@@ -158,11 +178,15 @@ namespace dxvk {
     uint64_t seq;
 
     { std::unique_lock<dxvk::mutex> lock(m_mutex);
-      seq = ++m_queueOrdered.seqDispatch;
+      if (m_hasError.load(std::memory_order_acquire) || m_stopped.load())
+        return 0u;
+
+      seq = m_queueOrdered.seqDispatch + 1u;
 
       auto& entry = m_queueOrdered.queue.emplace_back();
       entry.chunk = std::move(chunk);
       entry.seq = seq;
+      m_queueOrdered.seqDispatch = seq;
 
       helios_feed::csChunkEnqueued(
         m_queueOrdered.queue.size() + m_queueHighPrio.queue.size());
@@ -174,18 +198,22 @@ namespace dxvk {
   }
 
 
-  void DxvkCsThread::injectChunk(DxvkCsQueue queue, DxvkCsChunkRef&& chunk, bool synchronize) {
+  bool DxvkCsThread::injectChunk(DxvkCsQueue queue, DxvkCsChunkRef&& chunk, bool synchronize) {
     uint64_t timeline = 0u;
 
     { std::unique_lock<dxvk::mutex> lock(m_mutex);
-      auto& q = getQueue(queue);
+      if (m_hasError.load(std::memory_order_acquire) || m_stopped.load())
+        return false;
 
+      auto& q = getQueue(queue);
       if (synchronize)
-        timeline = ++q.seqDispatch;
+        timeline = q.seqDispatch + 1u;
 
       auto& entry = q.queue.emplace_back();
       entry.chunk = std::move(chunk);
       entry.seq = timeline;
+      if (synchronize)
+        q.seqDispatch = timeline;
 
       helios_feed::csChunkEnqueued(
         m_queueOrdered.queue.size() + m_queueHighPrio.queue.size());
@@ -203,50 +231,86 @@ namespace dxvk {
       std::unique_lock<dxvk::mutex> lock(m_counterMutex);
 
       m_condOnSync.wait(lock, [this, queue, timeline] {
-        return getCounter(queue).load() >= timeline;
+        return getCounter(queue).load() >= timeline || hasError();
       });
     }
+
+    return !hasError();
   }
 
 
-  void DxvkCsThread::synchronize(uint64_t seq) {
+  bool DxvkCsThread::synchronize(uint64_t seq) {
+    if (hasError())
+      return false;
+
     // Avoid locking if we know the sync is a no-op, may
     // reduce overhead if this is being called frequently
     if (seq > m_seqOrdered.load()) {
-      // We don't need to lock the queue here, if synchronization
-      // happens while another thread is submitting then there is
-      // an inherent race anyway
-      if (seq == SynchronizeAll)
+      // Snapshot all work accepted before this call. Concurrent dispatch
+      // after this snapshot belongs to the next synchronization.
+      if (seq == SynchronizeAll) {
+        std::lock_guard lock(m_mutex);
         seq = m_queueOrdered.seqDispatch;
+      }
 
       auto t0 = dxvk::high_resolution_clock::now();
 
       { std::unique_lock<dxvk::mutex> lock(m_counterMutex);
         m_condOnSync.wait(lock, [this, seq] {
-          return m_seqOrdered.load() >= seq;
+          return m_seqOrdered.load() >= seq || hasError();
         });
       }
 
       auto t1 = dxvk::high_resolution_clock::now();
       auto ticks = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
 
-      m_device->addStatCtr(DxvkStatCounter::CsSyncCount, 1);
-      m_device->addStatCtr(DxvkStatCounter::CsSyncTicks, ticks.count());
+      if (m_device) {
+        m_device->addStatCtr(DxvkStatCounter::CsSyncCount, 1);
+        m_device->addStatCtr(DxvkStatCounter::CsSyncTicks, ticks.count());
+      }
     }
+
+    return !hasError();
+  }
+
+
+  void DxvkCsThread::fail() {
+    std::vector<DxvkCsQueuedChunk> ordered;
+    std::vector<DxvkCsQueuedChunk> highPrio;
+
+    {
+      // Admission and the wait predicate are protected by different mutexes.
+      // Publish while holding both: no work can slip in after quarantine and
+      // no waiter can miss the terminal transition between checking and sleep.
+      std::lock_guard queueLock(m_mutex);
+      std::lock_guard counterLock(m_counterMutex);
+      m_hasError.store(true, std::memory_order_release);
+      ordered.swap(m_queueOrdered.queue);
+      highPrio.swap(m_queueHighPrio.queue);
+      m_hasHighPrio.store(false);
+    }
+
+    // A recording failure makes the API device unusable, but submitted GPU
+    // work retains its real completion path. Never signal a sequence/fence
+    // for a discarded command. Release captures outside both mutexes.
+    if (m_device)
+      m_device->notifyCsError();
+    m_condOnSync.notify_all();
   }
   
   
   void DxvkCsThread::threadFunc() {
-    env::setThreadName("dxvk-cs");
-
-    const bool traceFeed = helios_feed::enabled();
-
     // Local chunk queues, we use two queues and swap between
     // them in order to potentially reduce lock contention.
     std::vector<DxvkCsQueuedChunk> ordered;
     std::vector<DxvkCsQueuedChunk> highPrio;
 
     try {
+      // Startup helpers may allocate too. A failure before the first chunk
+      // must publish the same terminal state as a recording exception.
+      env::setThreadName("dxvk-cs");
+      const bool traceFeed = helios_feed::enabled();
+
       while (!m_stopped.load()) {
         { std::unique_lock<dxvk::mutex> lock(m_mutex);
 
@@ -264,7 +328,8 @@ namespace dxvk {
             });
 
             auto t1 = dxvk::high_resolution_clock::now();
-            m_device->addStatCtr(DxvkStatCounter::CsIdleTicks, std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+            if (m_device)
+              m_device->addStatCtr(DxvkStatCounter::CsIdleTicks, std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
 
             if (traceFeed)
               helios_feed::csWorkerIdle(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
@@ -305,7 +370,8 @@ namespace dxvk {
           bool isHighPrio = highPrioIndex < highPrio.size();
           auto& entry = isHighPrio ? highPrio[highPrioIndex++] : ordered[orderedIndex++];
 
-          m_context->addStatCtr(DxvkStatCounter::CsChunkCount, 1);
+          if (m_context)
+            m_context->addStatCtr(DxvkStatCounter::CsChunkCount, 1);
 
           const auto workStart = traceFeed
             ? dxvk::high_resolution_clock::now()
@@ -326,7 +392,9 @@ namespace dxvk {
             auto& counter = isHighPrio ? m_seqHighPrio : m_seqOrdered;
             counter.store(entry.seq);
 
-            m_condOnSync.notify_one();
+            // Both timelines share this condition variable. Waking only one
+            // may select a waiter for the other timeline and strand this one.
+            m_condOnSync.notify_all();
           }
 
           // Immediately free the chunk to release
@@ -338,9 +406,22 @@ namespace dxvk {
         highPrio.clear();
       }
     } catch (const DxvkError& e) {
-      m_hasError.store(true, std::memory_order_release);
-      Logger::err("Exception on CS thread!");
-      Logger::err(e.message());
+      fail();
+      reportCsError([&] {
+        Logger::err("Exception on CS thread! Command stream quarantined.");
+        Logger::err(e.message());
+      });
+    } catch (const std::exception& e) {
+      fail();
+      reportCsError([&] {
+        Logger::err("Standard exception on CS thread! Command stream quarantined.");
+        Logger::err(e.what());
+      });
+    } catch (...) {
+      fail();
+      reportCsError([] {
+        Logger::err("Unknown exception on CS thread! Command stream quarantined.");
+      });
     }
   }
   

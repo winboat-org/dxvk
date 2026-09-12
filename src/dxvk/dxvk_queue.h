@@ -88,6 +88,18 @@ namespace dxvk {
 
     ~DxvkSubmissionQueue();
 
+    // Recording failure is separate from Vulkan submission failure. It must
+    // wake API resource waiters without discarding or completing GPU work.
+    void notifyCsError() {
+      std::lock_guard lock(m_mutex);
+      m_csError.store(true, std::memory_order_release);
+      m_finishCond.notify_all();
+    }
+
+    bool hasCsError() const {
+      return m_csError.load(std::memory_order_acquire);
+    }
+
     void cancelProducerWaits() {
       m_cancelProducerWaits.store(true, std::memory_order_release);
     }
@@ -226,6 +238,7 @@ namespace dxvk {
     DxvkTimelineSemaphoreValues m_timelines;
 
     std::atomic<VkResult>       m_lastError = { VK_SUCCESS };
+    std::atomic<bool>           m_csError = { false };
     
     std::atomic<bool>           m_stopped = { false };
     std::atomic<bool>           m_cancelProducerWaits = { false };

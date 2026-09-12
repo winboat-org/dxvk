@@ -272,15 +272,21 @@ namespace dxvk {
       return m_shaderOptions;
     }
 
+    // Expose recording failure without changing submitted GPU work or fences.
+    void notifyCsError() {
+      m_submissionQueue.notifyCsError();
+    }
+
     /**
      * \brief Get device status
-     * 
-     * This may report device loss in
-     * case a submission failed.
+     *
+     * Reports an unusable API device after recording or submission failure.
+     * The submission queue retains its separate Vulkan completion status.
      * \returns Device status
      */
     VkResult getDeviceStatus() const {
-      return m_submissionQueue.getLastError();
+      return m_submissionQueue.hasCsError()
+        ? VK_ERROR_DEVICE_LOST : m_submissionQueue.getLastError();
     }
 
     /**
@@ -759,7 +765,7 @@ namespace dxvk {
      * \param [in] fence Fence to wait on
      * \param [in] value Fence value
      */
-    void waitForFence(sync::Fence& fence, uint64_t value);
+    bool waitForFence(sync::Fence& fence, uint64_t value);
 
     /**
      * \brief Waits for resource to become idle
@@ -767,7 +773,7 @@ namespace dxvk {
      * \param [in] resource Resource to wait for
      * \param [in] access Access mode to check
      */
-    void waitForResource(const DxvkPagedResource& resource, DxvkAccess access);
+    bool waitForResource(const DxvkPagedResource& resource, DxvkAccess access);
     
     /**
      * \brief Waits until the device becomes idle

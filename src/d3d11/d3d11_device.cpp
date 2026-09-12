@@ -155,7 +155,8 @@ namespace dxvk {
       return S_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
-      return E_INVALIDARG;
+      return m_dxvkDevice->getDeviceStatus() == VK_SUCCESS
+        ? E_INVALIDARG : DXGI_ERROR_DEVICE_REMOVED;
     }
   }
   
@@ -201,7 +202,8 @@ namespace dxvk {
       return S_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
-      return E_INVALIDARG;
+      return m_dxvkDevice->getDeviceStatus() == VK_SUCCESS
+        ? E_INVALIDARG : DXGI_ERROR_DEVICE_REMOVED;
     }
   }
   
@@ -289,7 +291,8 @@ namespace dxvk {
       return S_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
-      return E_INVALIDARG;
+      return m_dxvkDevice->getDeviceStatus() == VK_SUCCESS
+        ? E_INVALIDARG : DXGI_ERROR_DEVICE_REMOVED;
     }
   }
 
@@ -376,7 +379,8 @@ namespace dxvk {
       return S_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
-      return E_INVALIDARG;
+      return m_dxvkDevice->getDeviceStatus() == VK_SUCCESS
+        ? E_INVALIDARG : DXGI_ERROR_DEVICE_REMOVED;
     }
   }
   
@@ -2781,7 +2785,8 @@ namespace dxvk {
       feedback = ctx->ensureImageCompatibility(cImage, usageInfo);
     });
 
-    m_context->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
+    if (!m_context->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true))
+      return false;
 
     if (!feedback) {
       Logger::err(str::format("Failed to lock image:"
@@ -3122,7 +3127,8 @@ namespace dxvk {
       *gpuVASize = imageViewAddressProperties.size;
     } else if (resourceDesc.Dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
       Rc<DxvkBuffer> dxvkBuffer = GetCommonBuffer(pResource)->GetBuffer();
-      LockBuffer(dxvkBuffer);
+      if (!LockBuffer(dxvkBuffer))
+        return false;
 
       *gpuVAStart = dxvkBuffer->getSliceInfo().gpuAddress;
       *gpuVASize = dxvkBuffer->info().size;
@@ -3279,6 +3285,8 @@ namespace dxvk {
   bool D3D11DeviceExt::LockImage(
     const Rc<DxvkImage>&            Image,
           VkImageUsageFlags         Usage) {
+    if (m_device->GetDXVKDevice()->getDeviceStatus() != VK_SUCCESS)
+      return false;
     if (!Image->canRelocate() && (Image->info().usage & Usage))
       return true;
 
@@ -3286,10 +3294,12 @@ namespace dxvk {
   }
 
 
-  void D3D11DeviceExt::LockBuffer(
+  bool D3D11DeviceExt::LockBuffer(
     const Rc<DxvkBuffer>&           Buffer) {
+    if (m_device->GetDXVKDevice()->getDeviceStatus() != VK_SUCCESS)
+      return false;
     if (!Buffer->canRelocate())
-      return;
+      return true;
 
     auto chunk = m_device->AllocCsChunk(DxvkCsChunkFlag::SingleUse);
 
@@ -3297,7 +3307,7 @@ namespace dxvk {
       ctx->ensureBufferAddress(cBuffer);
     });
 
-    m_device->GetContext()->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
+    return m_device->GetContext()->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
   }
 
 

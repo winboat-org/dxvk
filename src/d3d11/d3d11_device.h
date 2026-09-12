@@ -755,7 +755,7 @@ namespace dxvk {
       const Rc<DxvkImage>&            Image,
             VkImageUsageFlags         Usage);
 
-    void LockBuffer(
+    bool LockBuffer(
       const Rc<DxvkBuffer>&           Buffer);
 
     dxvk::mutex m_mapLock;

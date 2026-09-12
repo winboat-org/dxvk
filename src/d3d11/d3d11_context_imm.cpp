@@ -37,7 +37,8 @@ namespace dxvk {
 
     // Stall here so that external submissions to the
     // CS thread can actually access the command list
-    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+    if (!SynchronizeCsThread(DxvkCsThread::SynchronizeAll))
+      throw DxvkError("D3D11: command stream failed during context creation");
     
     ClearState();
   }
@@ -50,8 +51,13 @@ namespace dxvk {
       return;
 
     m_device->cancelProducerWaits();
-    ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
-    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+    if (m_device->getDeviceStatus() == VK_SUCCESS)
+      ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
+    if (!SynchronizeCsThread(DxvkCsThread::SynchronizeAll))
+      Logger::err("D3D11: tearing down failed command stream; pending work was not completed");
+
+    // Recording failure is not GPU completion. Drain genuinely submitted work
+    // before releasing its resources; the CS member joins its failed worker.
     SynchronizeDevice();
   }
   
@@ -81,6 +87,9 @@ namespace dxvk {
           void*                             pData,
           UINT                              DataSize,
           UINT                              GetDataFlags) {
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      return DXGI_ERROR_DEVICE_REMOVED;
+
     if (!pAsync || (DataSize && !pData))
       return E_INVALIDARG;
     
@@ -186,6 +195,9 @@ namespace dxvk {
     D3D10DeviceLock lock = LockContext();
     auto fence = static_cast<D3D11Fence*>(pFence);
 
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      return DXGI_ERROR_DEVICE_REMOVED;
+
     if (!fence)
       return E_INVALIDARG;
 
@@ -200,7 +212,7 @@ namespace dxvk {
       m_flushReason = "Fence signal";
 
     ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
-    return S_OK;
+    return m_device->getDeviceStatus() == VK_SUCCESS ? S_OK : DXGI_ERROR_DEVICE_REMOVED;
   }
 
 
@@ -209,6 +221,9 @@ namespace dxvk {
           UINT64                      Value) {
     D3D10DeviceLock lock = LockContext();
     auto fence = static_cast<D3D11Fence*>(pFence);
+
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      return DXGI_ERROR_DEVICE_REMOVED;
 
     if (!fence)
       return E_INVALIDARG;
@@ -225,7 +240,7 @@ namespace dxvk {
       ctx->waitFence(cFence, cValue);
     });
 
-    return S_OK;
+    return m_device->getDeviceStatus() == VK_SUCCESS ? S_OK : DXGI_ERROR_DEVICE_REMOVED;
   }
 
 
@@ -413,6 +428,11 @@ namespace dxvk {
           D3D11_MAPPED_SUBRESOURCE*   pMappedResource) {
     D3D10DeviceLock lock = LockContext();
 
+    if (pMappedResource)
+      *pMappedResource = { };
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      return DXGI_ERROR_DEVICE_REMOVED;
+
     if (unlikely(!pResource))
       return E_INVALIDARG;
 
@@ -424,14 +444,22 @@ namespace dxvk {
     D3D11_RESOURCE_DIMENSION resourceDim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
     pResource->GetType(&resourceDim);
 
+    HRESULT hr;
     if (likely(resourceDim == D3D11_RESOURCE_DIMENSION_BUFFER)) {
-      return MapBuffer(
+      hr = MapBuffer(
         static_cast<D3D11Buffer*>(pResource),
         MapType, MapFlags, pMappedResource);
     } else {
-      return MapImage(GetCommonTexture(pResource),
+      hr = MapImage(GetCommonTexture(pResource),
         Subresource, MapType, MapFlags, pMappedResource);
     }
+
+    if (m_device->getDeviceStatus() != VK_SUCCESS) {
+      if (pMappedResource)
+        *pMappedResource = { };
+      return DXGI_ERROR_DEVICE_REMOVED;
+    }
+    return hr;
   }
   
   
@@ -510,7 +538,8 @@ namespace dxvk {
       auto sequenceNumber = pResource->GetSequenceNumber();
 
       if (MapType != D3D11_MAP_READ && !MapFlags && bufferSize <= D3D11Initializer::MaxMemoryPerSubmission) {
-        SynchronizeCsThread(sequenceNumber);
+        if (!SynchronizeCsThread(sequenceNumber))
+          return DXGI_ERROR_DEVICE_REMOVED;
 
         bool hasWoAccess = buffer->isInUse(DxvkAccess::Write);
         bool hasRwAccess = buffer->isInUse(DxvkAccess::Read);
@@ -678,7 +707,8 @@ namespace dxvk {
         doFlags = DoWait;
       } else if (MapType != D3D11_MAP_WRITE_NO_OVERWRITE || mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_BUFFER) {
         // Need to synchronize thread to determine pending GPU accesses
-        SynchronizeCsThread(sequenceNumber);
+        if (!SynchronizeCsThread(sequenceNumber))
+          return DXGI_ERROR_DEVICE_REMOVED;
 
         // Don't implicitly discard large very large resources
         // since that might lead to memory issues.
@@ -982,15 +1012,18 @@ namespace dxvk {
   }
 
 
-  void D3D11ImmediateContext::SynchronizeCsThread(uint64_t SequenceNumber) {
+  bool D3D11ImmediateContext::SynchronizeCsThread(uint64_t SequenceNumber) {
     D3D10DeviceLock lock = LockContext();
 
     // Dispatch current chunk so that all commands
     // recorded prior to this function will be run
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      return false;
     if (SequenceNumber > m_csSeqNum)
       FlushCsChunk();
     
-    m_csThread.synchronize(SequenceNumber);
+    return m_csThread.synchronize(SequenceNumber)
+      && m_device->getDeviceStatus() == VK_SUCCESS;
   }
   
   
@@ -1024,6 +1057,9 @@ namespace dxvk {
           uint64_t                          SequenceNumber,
           D3D11_MAP                         MapType,
           UINT                              MapFlags) {
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      return false;
+
     // Determine access type to wait for based on map mode
     DxvkAccess access = MapType == D3D11_MAP_READ
       ? DxvkAccess::Write
@@ -1033,7 +1069,8 @@ namespace dxvk {
     // otherwise we cannot accurately determine if the resource is
     // actually being used by the GPU right now.
     if (!Resource.isInUse(access)) {
-      SynchronizeCsThread(SequenceNumber);
+      if (!SynchronizeCsThread(SequenceNumber))
+        return false;
 
       if (!Resource.isInUse(access))
         return true;
@@ -1058,22 +1095,28 @@ namespace dxvk {
       if (helios_feed::enabled()) {
         const auto t0 = std::chrono::steady_clock::now();
         ExecuteFlush(GpuFlushType::ImplicitSynchronization, nullptr, false);
-        SynchronizeCsThread(SequenceNumber);
-        m_device->waitForResource(Resource, access);
+        if (!SynchronizeCsThread(SequenceNumber))
+          return false;
+        if (!m_device->waitForResource(Resource, access))
+          return false;
         const auto t1 = std::chrono::steady_clock::now();
         helios_feed::mapGpuWait(
           std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
       } else {
         ExecuteFlush(GpuFlushType::ImplicitSynchronization, nullptr, false);
-        SynchronizeCsThread(SequenceNumber);
-        m_device->waitForResource(Resource, access);
+        if (!SynchronizeCsThread(SequenceNumber))
+          return false;
+        if (!m_device->waitForResource(Resource, access))
+          return false;
       }
       return true;
     }
   }
 
 
-  bool D3D11ImmediateContext::HeliosWaitFrameComplete(uint64_t TimeoutUs) {
+  VkResult D3D11ImmediateContext::HeliosWaitFrameComplete(uint64_t TimeoutUs) {
+    if (m_csThread.hasError() || m_device->getDeviceStatus() != VK_SUCCESS)
+      return VK_ERROR_DEVICE_LOST;
     uint64_t submissionId;
 
     {
@@ -1086,23 +1129,26 @@ namespace dxvk {
       submissionId = m_submissionId;
     }
 
-    if (m_submissionFence->value() >= submissionId)
-      return true;
-
     // Sleep on DXVK's submission-fence condition variable. The queue-completion
     // thread wakes this immediately; the bounded timeout remains a loud
     // last-resort escape instead of a scheduler-polling loop.
-    return m_submissionFence->waitFor(
+    const bool completed = m_submissionFence->waitFor(
       submissionId, std::chrono::microseconds(TimeoutUs));
+    // ExecuteFlush may have refused work after a recording failure. An older
+    // completed submission is then no evidence for this frame's completion.
+    if (m_csThread.hasError() || m_device->getDeviceStatus() != VK_SUCCESS)
+      return VK_ERROR_DEVICE_LOST;
+    return completed ? VK_SUCCESS : VK_TIMEOUT;
   }
 
 
   uint64_t D3D11ImmediateContext::HeliosFlushFrame() {
     D3D10DeviceLock lock = LockContext();
-    if (m_csThread.hasError())
+    if (m_csThread.hasError() || m_device->getDeviceStatus() != VK_SUCCESS)
       return 0;
     ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, false);
-    return m_submissionId;
+    return m_csThread.hasError() || m_device->getDeviceStatus() != VK_SUCCESS
+      ? 0u : m_submissionId;
   }
 
 
@@ -1123,7 +1169,7 @@ namespace dxvk {
   }
 
 
-  void D3D11ImmediateContext::HeliosWaitFrameSubmitted() {
+  bool D3D11ImmediateContext::HeliosWaitFrameSubmitted() {
     uint64_t sequenceNumber;
 
     {
@@ -1159,7 +1205,8 @@ namespace dxvk {
     // flight limiter every DXVK app already runs with.
     if (helios_feed::enabled()) {
       const auto csBegin = std::chrono::steady_clock::now();
-      SynchronizeCsThread(sequenceNumber);
+      if (!SynchronizeCsThread(sequenceNumber))
+        return false;
       const auto csEnd = std::chrono::steady_clock::now();
       m_device->syncSubmissions();
       const auto submissionsEnd = std::chrono::steady_clock::now();
@@ -1168,9 +1215,11 @@ namespace dxvk {
         std::chrono::duration_cast<std::chrono::nanoseconds>(csEnd - csBegin).count(),
         std::chrono::duration_cast<std::chrono::nanoseconds>(submissionsEnd - csEnd).count());
     } else {
-      SynchronizeCsThread(sequenceNumber);
+      if (!SynchronizeCsThread(sequenceNumber))
+        return false;
       m_device->syncSubmissions();
     }
+    return m_device->getDeviceStatus() == VK_SUCCESS;
   }
 
 
@@ -1319,13 +1368,13 @@ namespace dxvk {
   }
 
 
-  void D3D11ImmediateContext::InjectCsChunk(
+  bool D3D11ImmediateContext::InjectCsChunk(
           DxvkCsQueue                 Queue,
           DxvkCsChunkRef&&            Chunk,
           bool                        Synchronize) {
     // Do not update the sequence number when emitting a chunk
     // from an external source since that would break tracking
-    m_csThread.injectChunk(Queue, std::move(Chunk), Synchronize);
+    return m_csThread.injectChunk(Queue, std::move(Chunk), Synchronize);
   }
 
 
@@ -1334,7 +1383,11 @@ namespace dxvk {
     // can processe them before the first use.
     m_parent->FlushInitCommands();
 
-    m_csSeqNum = m_csThread.dispatchChunk(std::move(chunk));
+    // Zero is a refusal, not a completed sequence. Keep the last accepted
+    // sequence intact so failure cannot manufacture progress for a resource.
+    const auto sequence = m_csThread.dispatchChunk(std::move(chunk));
+    if (sequence)
+      m_csSeqNum = sequence;
     m_heliosInlineReplayChunkCount = 0u;
     m_heliosInlineReplayBytes = 0ull;
   }
@@ -1499,6 +1552,9 @@ namespace dxvk {
           GpuFlushType                FlushType,
           HANDLE                      hEvent,
           BOOL                        Synchronize) {
+    if (m_device->getDeviceStatus() != VK_SUCCESS)
+      return;
+
     bool synchronizeSubmission = Synchronize && m_parent->Is11on12Device();
 
     if (synchronizeSubmission)
@@ -1550,7 +1606,7 @@ namespace dxvk {
 
     // If necessary, block calling thread until the
     // Vulkan queue submission is performed.
-    if (synchronizeSubmission)
+    if (synchronizeSubmission && SynchronizeCsThread(m_csSeqNum))
       m_device->waitForSubmission(&m_submitStatus);
 
     // Free local staging buffer so that we don't
