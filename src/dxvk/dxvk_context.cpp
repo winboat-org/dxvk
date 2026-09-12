@@ -10511,7 +10511,7 @@ namespace dxvk {
       m_cmd->track(image);
 
       Logger::debug(str::format("DxvkContext: released shared image to EXTERNAL: ",
-        std::hex, reinterpret_cast<uintptr_t>(image->handle())));
+        std::hex, image->handle()));
 
       bool tracked = false;
 
@@ -10594,7 +10594,7 @@ namespace dxvk {
       m_cmd->track(image);
 
       Logger::debug(str::format("DxvkContext: acquired shared image from EXTERNAL: ",
-        std::hex, reinterpret_cast<uintptr_t>(image->handle())));
+        std::hex, image->handle()));
     }
 
     m_sharedImagesReleased.clear();
