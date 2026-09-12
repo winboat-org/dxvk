@@ -292,6 +292,11 @@ namespace dxvk {
 
     bool                    m_hasPendingUnresolvedPass = false;
 
+    // Local, single-sample resolve target for presentation format changes.
+    // CS closures retain old targets across a resize; this cache owns only
+    // the most recent geometry and never exports its allocation to WDDM.
+    Rc<DxvkImage>           m_heliosPresentResolve;
+
     HRESULT MapBuffer(
             D3D11Buffer*                pResource,
             D3D11_MAP                   MapType,

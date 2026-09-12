@@ -1277,6 +1277,51 @@ namespace dxvk {
           bool                  WindowedBltReservation) {
     D3D10DeviceLock lock = LockContext();
 
+    const auto& srcInfo = SrcImage->info();
+    const auto& dstInfo = DstImage->info();
+    if (dstInfo.sampleCount != VK_SAMPLE_COUNT_1_BIT
+     || srcInfo.type != VK_IMAGE_TYPE_2D || dstInfo.type != VK_IMAGE_TYPE_2D
+     || srcInfo.numLayers != 1 || dstInfo.numLayers != 1
+     || Extent.depth != 1 || srcInfo.extent.depth != 1 || dstInfo.extent.depth != 1
+     || srcInfo.extent.width != Extent.width || srcInfo.extent.height != Extent.height
+     || dstInfo.extent.width != Extent.width || dstInfo.extent.height != Extent.height) {
+      Logger::err("Helios: refused incompatible presentation resolve geometry");
+      return false;
+    }
+
+    const bool multisampled = srcInfo.sampleCount != VK_SAMPLE_COUNT_1_BIT;
+    Rc<DxvkImage> resolveTarget;
+    if (multisampled && srcInfo.format != dstInfo.format) {
+      // Resolve in the source's own format first. In particular, sRGB
+      // samples must be averaged in linear space and encoded back to sRGB.
+      // The subsequent compatible copy preserves those encoded bytes in
+      // the UNORM scanout image (DXGI_DDI_BASE_FUNCTIONS, pfnPresent).
+      // A foreign sRGB view of the exported UNORM image cannot be assumed
+      // compatible with the KMD's canonical image-creation contract.
+      if (m_heliosPresentResolve == nullptr
+       || m_heliosPresentResolve->info().format != srcInfo.format
+       || m_heliosPresentResolve->info().extent.width != Extent.width
+       || m_heliosPresentResolve->info().extent.height != Extent.height) {
+        DxvkImageCreateInfo info = { };
+        info.format = srcInfo.format;
+        info.sampleCount = VK_SAMPLE_COUNT_1_BIT;
+        info.extent = Extent;
+        info.numLayers = 1;
+        info.mipLevels = 1;
+        info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                   | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        info.stages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                    | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        info.access = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                    | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        info.layout = VK_IMAGE_LAYOUT_GENERAL;
+        m_heliosPresentResolve = m_device->createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      }
+      resolveTarget = m_heliosPresentResolve;
+    } else if (multisampled) {
+      resolveTarget = DstImage;
+    }
+
     // Capture this snapshot-slot's reservation epoch before Present can issue
     // the current KMD reader lease. The later CS closure uses these scalars;
     // re-reading N+1 there would make the overwrite wait circular.
@@ -1314,6 +1359,7 @@ namespace dxvk {
     EmitCs([
       cDstImage = DstImage,
       cSrcImage = SrcImage,
+      cResolveTarget = resolveTarget,
       cExtent   = Extent,
       cReservationResid = reservationResid,
       cReservationGeneration = reservationGeneration,
@@ -1328,10 +1374,29 @@ namespace dxvk {
           cReservationFence);
       const VkImageSubresourceLayers layers =
         { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u };
-      ctx->copyImage(
-        cDstImage, layers, VkOffset3D { 0, 0, 0 },
-        cSrcImage, layers, VkOffset3D { 0, 0, 0 },
-        cExtent);
+      Rc<DxvkImage> source = cSrcImage;
+      if (cResolveTarget != nullptr) {
+        const VkImageResolve region = {
+          layers, VkOffset3D { 0, 0, 0 },
+          layers, VkOffset3D { 0, 0, 0 }, cExtent,
+        };
+        ctx->resolveImage(cResolveTarget, source, region, source->info().format,
+          VK_RESOLVE_MODE_AVERAGE_BIT, VK_RESOLVE_MODE_NONE);
+        source = cResolveTarget;
+      }
+      if (source != cDstImage) {
+        if (getLinearFormat(cDstImage->info().format) == getLinearFormat(source->info().format)) {
+          ctx->copyImage(
+            cDstImage, layers, VkOffset3D { 0, 0, 0 },
+            source, layers, VkOffset3D { 0, 0, 0 }, cExtent);
+        } else {
+          // Packed RGB10 requires numeric conversion, including after MSAA
+          // resolve. A copy-format reinterpretation scrambles its channels.
+          ctx->copyImageConverted(
+            cDstImage, layers, VkOffset3D { 0, 0, 0 },
+            source, layers, VkOffset3D { 0, 0, 0 }, cExtent);
+        }
+      }
     });
     return true;
   }
