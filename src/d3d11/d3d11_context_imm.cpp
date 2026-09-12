@@ -106,16 +106,12 @@ namespace dxvk {
     HRESULT hr = query->GetData(pData, GetDataFlags);
     helios_feed::getData(hr == S_OK);
     
-    // If we're likely going to spin on the asynchronous object,
-    // flush the context so that we're keeping the GPU busy.
-    if (hr == S_FALSE) {
-      // Don't mark the event query as stalling if the app does
-      // not intend to spin on it. This reduces flushes on End.
-      if (!(GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH))
-        query->NotifyStall();
+    // The DDI's DO_NOT_FLUSH contract forbids submitting partial command
+    // buffers for this query. Preserve it through the API/engine boundary:
+    // only an unflagged pending read may request a flush or mark a stall.
+    if (hr == S_FALSE && !(GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH)) {
+      query->NotifyStall();
 
-      // Ignore the DONOTFLUSH flag here as some games will spin
-      // on queries without ever flushing the context otherwise.
       D3D10DeviceLock lock = LockContext();
 
       if (unlikely(m_device->debugFlags().test(DxvkDebugFlag::Capture)))
