@@ -338,6 +338,39 @@ namespace dxvk {
         : OptimizeLayout(imageInfo.usage);
     }
 
+    // The vehicle is a transfer-only alias of a Vulkan WSI image, not a new
+    // D3D11 texture. Restore its exact creation parameters after all ordinary
+    // D3D11 flag/format/map-mode normalization, before querying or allocating.
+    DxvkHeliosImageImport sourceTemplate;
+    if (pHeliosImport && pHeliosImport->SourceCreateInfo) {
+      const auto& source = *pHeliosImport->SourceCreateInfo;
+      if (!sourceTemplate.init(source)
+       || source.format != formatInfo.Format
+       || source.extent.width != m_desc.Width || source.extent.height != m_desc.Height
+       || m_mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_NONE
+       || pHeliosImport->ScanoutLinear || pHeliosImport->LinearScanoutTarget
+       || pHeliosImport->CrossContextOptimal || pHeliosImport->DedicatedPresentBuffer)
+        throw DxvkError("D3D11: incompatible Helios vehicle source create-info");
+      imageInfo.type = source.imageType;
+      imageInfo.format = source.format;
+      imageInfo.flags = source.flags;
+      imageInfo.sampleCount = source.samples;
+      imageInfo.extent = source.extent;
+      imageInfo.numLayers = source.arrayLayers;
+      imageInfo.mipLevels = source.mipLevels;
+      imageInfo.usage = source.usage;
+      imageInfo.tiling = source.tiling;
+      imageInfo.initialLayout = source.initialLayout;
+      imageInfo.layout = VK_IMAGE_LAYOUT_GENERAL;
+      imageInfo.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      imageInfo.access = VK_ACCESS_TRANSFER_READ_BIT;
+      imageInfo.viewFormatCount = sourceTemplate.formatCount();
+      imageInfo.viewFormats = sourceTemplate.formats();
+      imageInfo.heliosDirectImportAlias = VK_TRUE;
+      imageInfo.heliosSourceCreateInfo = &source;
+      imageInfo.heliosWsiExternalOwnership = pHeliosImport->SourceExternalOwnership;
+    }
+
     // Check if we can actually create the image
     if (!CheckImageSupport(&imageInfo, imageInfo.tiling)) {
       throw DxvkError(str::format(

@@ -96,6 +96,9 @@ namespace dxvk {
     // The external memory was exported as a dedicated allocation for the exact
     // KMD Present buffer. It must never fall back to an image import.
     bool     DedicatedPresentBuffer = false;
+    // Vehicle v3: exact producer template, borrowed through texture creation.
+    const VkImageCreateInfo* SourceCreateInfo = nullptr;
+    bool SourceExternalOwnership = false;
   };
 
 

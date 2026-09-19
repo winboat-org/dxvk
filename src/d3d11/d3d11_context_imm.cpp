@@ -5,6 +5,7 @@
 #include "d3d11_texture.h"
 
 #include "../dxvk/dxvk_helios_feed_trace.h"
+#include "../dxvk/dxvk_helios_present_format.h"
 #include "../dxvk/dxvk_helios_scanout_acquire.h"
 #include "../util/util_win32_compat.h"
 
@@ -1252,7 +1253,8 @@ namespace dxvk {
     ] (DxvkContext* ctx) {
       const VkImageSubresourceLayers layers =
         { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u };
-      if (cDstImage->info().format == cSrcImage->info().format) {
+      if (heliosPresentCopyPreservesBytes(cDstImage->info().format,
+                                         cSrcImage->info().format)) {
         ctx->copyImage(
           cDstImage, layers, VkOffset3D { 0, 0, 0 },
           cSrcImage, layers, VkOffset3D { 0, 0, 0 },

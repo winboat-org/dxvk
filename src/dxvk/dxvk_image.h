@@ -1,9 +1,12 @@
 #pragma once
 
+#include <memory>
+
 #include "dxvk_buffer.h"
 #include "dxvk_descriptor_pool.h"
 #include "dxvk_fence.h"
 #include "dxvk_format.h"
+#include "dxvk_helios_image_import.h"
 #include "dxvk_memory.h"
 #include "dxvk_sparse.h"
 #include "dxvk_util.h"
@@ -81,6 +84,13 @@ namespace dxvk {
     // Skips the staging/magenta gates so the import binds the venus memory
     // directly (recursion guard).
     VkBool32 heliosDirectImportAlias = VK_FALSE;
+
+    // Borrowed only through createImage/its constructor. The image deep-copies
+    // the complete supported template; no source-chain pointer survives.
+    const VkImageCreateInfo* heliosSourceCreateInfo = nullptr;
+    // v4 WSI source: EXTERNAL ownership is scoped to its actual helper read,
+    // not the generic eager self-acquire at command-list start.
+    bool heliosWsiExternalOwnership = false;
 
     // Helios: this image is the exact DWM scan-out primary. It is a plain
     // LINEAR + DMA_BUF image; ordinary shared images remain OPTIMAL + OPAQUE_FD.
@@ -941,6 +951,18 @@ namespace dxvk {
       return m_heliosDebugMagenta;
     }
 
+    /**
+     * Helios external ownership barriers are recorded on the execution
+     * command buffer. Resource-local access tracking cannot promote an
+     * access ahead of those barriers, or ahead of a backing rotation's
+     * transitions recorded under another DxvkImage identity. Staged and
+     * diagnostic stand-ins are private images, not external aliases.
+     */
+    bool requiresHeliosOrderedAccess() const {
+      return m_info.heliosWsiExternalOwnership
+          || (m_info.shared && !m_heliosGdiStaged && !m_heliosDebugMagenta);
+    }
+
     // Exact allocation generation and epoch consumed by the recorded copy.
     void setHeliosLastRefresh(uint64_t generation, uint64_t epoch) {
       m_heliosRefreshSequence.fetch_add(1, std::memory_order_acq_rel);
@@ -1015,6 +1037,7 @@ namespace dxvk {
     VkShaderStageFlags          m_shaderStages = 0u;
 
     DxvkImageCreateInfo         m_info        = { };
+    std::unique_ptr<DxvkHeliosImageImport> m_heliosImportTemplate;
 
     uint32_t                    m_version     = 0u;
     bool                        m_shared      = false;

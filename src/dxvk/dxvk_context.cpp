@@ -9,6 +9,7 @@
 #include "dxvk_device.h"
 #include "dxvk_context.h"
 #include "dxvk_helios_producer.h"
+#include "dxvk_helios_wsi_ownership.h"
 
 namespace dxvk {
 
@@ -587,6 +588,28 @@ namespace dxvk {
     // already captured by a refresh / passed explicitly by WSI. The command
     // list waits on its submission worker before any source-reading work.
     heliosPresentWaitBeforeRefresh(srcImage, producer);
+
+    if (srcImage->info().heliosWsiExternalOwnership) {
+      if (!formatsAreImageCopyCompatible(dstImage->info().format, srcImage->info().format)
+       || srcImage->info().layout != VK_IMAGE_LAYOUT_GENERAL)
+        throw DxvkError("Helios v4 WSI source requires a GENERAL-layout byte-preserving copy");
+
+      // Never eagerly self-acquire a WSI source at list start: the producer
+      // can be rendering its next frame then. Acquire the exact current source
+      // only around this read, after this list's explicit producer wait.
+      endCurrentPass(true);
+      flushBarriers();
+      m_execBarriers.addImageBarrier(heliosWsiSourceBarrier(srcImage->handle(),
+        srcImage->getAvailableSubresources(), m_device->queues().graphics.queueFamily, true));
+      flushBarriers();
+      copyImageHw(dstImage, dstSubresource, dstOffset,
+        srcImage, srcSubresource, srcOffset, extent, true);
+      flushBarriers();
+      m_execBarriers.addImageBarrier(heliosWsiSourceBarrier(srcImage->handle(),
+        srcImage->getAvailableSubresources(), m_device->queues().graphics.queueFamily, false));
+      flushBarriers();
+      return;
+    }
 
     if (this->copyImageClear(dstImage, dstSubresource, dstOffset, extent, srcImage, srcSubresource)
      || this->copyImageInline(*dstImage, dstSubresource, dstOffset, *srcImage, srcSubresource, srcOffset, extent))
@@ -4516,7 +4539,8 @@ namespace dxvk {
     const Rc<DxvkImage>&        srcImage,
           VkImageSubresourceLayers srcSubresource,
           VkOffset3D            srcOffset,
-          VkExtent3D            extent) {
+          VkExtent3D            extent,
+          bool                  forceExec) {
     auto dstSubresourceRange = vk::makeSubresourceRange(dstSubresource);
     auto srcSubresourceRange = vk::makeSubresourceRange(srcSubresource);
 
@@ -4560,8 +4584,9 @@ namespace dxvk {
     }
 
     // Try to do the copy out of order to avoid barrier spam
-    DxvkCmdBuffer cmdBuffer = prepareOutOfOrderTransfer(
-      DxvkCmdBuffer::InitBuffer, accessBatch.size(), accessBatch.data());
+    DxvkCmdBuffer cmdBuffer = forceExec ? DxvkCmdBuffer::ExecBuffer
+      : prepareOutOfOrderTransfer(
+        DxvkCmdBuffer::InitBuffer, accessBatch.size(), accessBatch.data());
 
     if (cmdBuffer == DxvkCmdBuffer::ExecBuffer)
       this->endCurrentPass(true);
@@ -9712,6 +9737,8 @@ namespace dxvk {
 
   void DxvkContext::trackSharedImageTouched(
             DxvkImage&                image) {
+    if (image.info().heliosWsiExternalOwnership)
+      return; // Explicit acquire/copy/release, no eager next-list self-acquire.
     for (const auto& e : m_sharedImagesTouched) {
       if (e == &image)
         return;
@@ -10777,7 +10804,8 @@ namespace dxvk {
           dstAccess |= e.access;
         }
 
-        bool canPromote = !e.image->isTracked(m_trackingId, DxvkAccess::Write);
+        bool canPromote = !e.image->requiresHeliosOrderedAccess()
+          && !e.image->isTracked(m_trackingId, DxvkAccess::Write);
 
         bool hasTransition = transitionImageLayout(cmdBuffer,
           *e.image, e.imageSubresources,
@@ -11579,6 +11607,11 @@ namespace dxvk {
     const VkImageSubresourceRange&  subresources,
           bool                      discard,
           DxvkAccess                access) {
+    // An otherwise-unused external image can still have an execution-buffer
+    // ownership acquire or an alias's earlier rotation transition pending.
+    if (image.requiresHeliosOrderedAccess())
+      return DxvkCmdBuffer::ExecBuffer;
+
     // Sparse resources can alias, need to ignore.
     if (unlikely(image.info().flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT))
       return DxvkCmdBuffer::ExecBuffer;
@@ -11649,7 +11682,8 @@ namespace dxvk {
   bool DxvkContext::prepareOutOfOrderTransition(
           DxvkImage&                image) {
     // Sparse resources can alias, need to ignore.
-    return !(image.isTracked(m_trackingId, DxvkAccess::Write))
+    return !image.requiresHeliosOrderedAccess()
+        && !(image.isTracked(m_trackingId, DxvkAccess::Write))
         && !(image.info().flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT);
   }
 

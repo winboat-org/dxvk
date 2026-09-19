@@ -183,6 +183,14 @@ namespace dxvk {
     m_shaderStages  (util::shaderStages(createInfo.stages)),
     m_info          (createInfo) {
     m_heliosDevice = device;
+    if (createInfo.heliosSourceCreateInfo) {
+      m_heliosImportTemplate = std::make_unique<DxvkHeliosImageImport>();
+      if (!m_heliosImportTemplate->init(*createInfo.heliosSourceCreateInfo))
+        throw DxvkError("DxvkImage: unsupported Helios source create-info");
+      m_info.heliosSourceCreateInfo = nullptr;
+    }
+    if (m_info.heliosWsiExternalOwnership && !m_heliosImportTemplate)
+      throw DxvkError("Helios v4 WSI ownership requires an exact source template");
     m_allocator->registerResource(this);
 
     copyFormatList(createInfo.viewFormatCount, createInfo.viewFormats);
@@ -267,6 +275,7 @@ namespace dxvk {
         " memType=", m_info.sharing.heliosMemoryTypeIndex,
         " staged=", (m_heliosGdiStaged ? 1u : 0u),
         " alias=", (m_info.heliosDirectImportAlias ? 1u : 0u),
+        " wsiExternal=", (m_info.heliosWsiExternalOwnership ? 1u : 0u),
         " scanoutTarget=", (m_info.heliosLinearScanoutTarget ? 1u : 0u),
         " directOptimal=", (m_info.heliosDirectOptimalScanout ? 1u : 0u),
         " crossContextOptimal=", (m_info.heliosCrossContextOptimal ? 1u : 0u),
@@ -427,7 +436,8 @@ namespace dxvk {
       }
     }
 
-    if ((m_info.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && formatList.viewFormatCount)
+    if (!m_heliosImportTemplate &&
+        (m_info.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && formatList.viewFormatCount)
       formatList.pNext = std::exchange(imageInfo.pNext, &formatList);
 
     // Helios gets WDDM allocation/resource KMT handles from d3d10umddi and
@@ -440,12 +450,14 @@ namespace dxvk {
     const bool heliosKmtShared = heliosKmtOnlySharedResources();
     bool useVulkanExternalMemory = m_shared && !heliosKmtShared;
     bool useHeliosRendererExternalMemory = m_shared && heliosKmtShared;
-    // Scan-out surfaces use DMA_BUF; ordinary shared surfaces retain the
+    // Scan-out surfaces and exact WSI aliases use DMA_BUF, matching their
+    // resource-id imports; ordinary shared surfaces retain the
     // renderer opaque-fd handle. Both externalInfo.handleTypes and
     // sharedExport.handleTypes key off this.
     VkExternalMemoryHandleTypeFlagBits heliosRendererHandleType =
       (m_info.heliosScanoutPrimary || m_info.heliosLinearScanoutTarget
-       || m_info.heliosDirectOptimalScanout || m_info.heliosCrossContextOptimal)
+       || m_info.heliosDirectOptimalScanout || m_info.heliosCrossContextOptimal
+       || m_heliosImportTemplate)
         ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
         : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
@@ -935,6 +947,14 @@ namespace dxvk {
 
   VkImageCreateInfo DxvkImage::getImageCreateInfo(
     const DxvkImageUsageInfo&         usageInfo) const {
+    if (m_heliosImportTemplate) {
+      // Imported dedicated images cannot gain usage, flags, or view formats
+      // during relocation. The external creator's template is authoritative.
+      if ((usageInfo.flags & ~m_info.flags) || (usageInfo.usage & ~m_info.usage)
+       || usageInfo.viewFormatCount)
+        throw DxvkError("DxvkImage: cannot augment a dedicated Helios source");
+      return m_heliosImportTemplate->info();
+    }
     VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     info.flags = m_info.flags | usageInfo.flags;
     info.imageType = m_info.type;

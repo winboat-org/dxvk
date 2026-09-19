@@ -1920,7 +1920,8 @@ namespace dxvk {
       const Rc<DxvkImage>&        srcImage,
             VkImageSubresourceLayers srcSubresource,
             VkOffset3D            srcOffset,
-            VkExtent3D            extent);
+            VkExtent3D            extent,
+            bool                  forceExec = false);
     
     void copyImageFb(
       const Rc<DxvkImage>&        dstImage,
