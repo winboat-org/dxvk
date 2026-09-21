@@ -21,6 +21,21 @@ namespace dxvk {
     VkResult vrTransfer = vk->vkCreateSemaphore(vk->device(), &semaphoreInfo, nullptr, &m_semaphores.transfer);
 
     if (vrGraphics || vrTransfer) {
+      { std::unique_lock<dxvk::mutex> lock(m_mutex);
+        m_stopped.store(true);
+      }
+
+      m_appendCond.notify_all();
+      m_submitCond.notify_all();
+
+      m_submitThread.join();
+      m_finishThread.join();
+
+      if (!vrGraphics)
+        vk->vkDestroySemaphore(vk->device(), m_semaphores.graphics, nullptr);
+      if (!vrTransfer)
+        vk->vkDestroySemaphore(vk->device(), m_semaphores.transfer, nullptr);
+
       throw DxvkError(str::format("Failed to create timeline semaphores: ",
         vrGraphics > vrTransfer ? vrGraphics : vrTransfer));
     }
