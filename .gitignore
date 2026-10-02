@@ -1,0 +1,7 @@
+
+# Local standalone devenv state
+/.devenv/
+/.direnv/
+
+/result
+/result-*
