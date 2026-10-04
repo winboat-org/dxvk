@@ -19,3 +19,10 @@ Guest dispatch records require Stage 4's local disk mirror and durable elevated
 backend. They are plans, with runtime verification pending; MinGW outputs cannot
 substitute for an MSVC static engine. Licenses and debug symbols must accompany
 exported artifacts.
+
+The environment's engine targets use `cross-engine.nix` on Linux. Supply
+`dependencies.msvcCrossFile`, `msvcSysroot` and `msvcInspector` from the locked
+shared toolchain. Both architectures retain `/MT`, generated bridge headers,
+embedded CodeView symbols and architecture/CRT inspections. The root controller
+imports these archives into the Windows UMD build; MinGW DLLs remain a separate
+standalone target.

@@ -9,7 +9,17 @@
 }:
 assert toolchain == { };
 assert schemaVersion == 1;
-if target == "engine-x64" || target == "engine-x86" then
+if (target == "engine-x64" || target == "engine-x86") && dependencies ? msvcCrossFile then
+  import ./cross-engine.nix {
+    inherit
+      pkgs
+      sources
+      dependencies
+      target
+      configuration
+      ;
+  }
+else if target == "engine-x64" || target == "engine-x86" then
   {
     backend = "devbox";
     purpose = "build";
